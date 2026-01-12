@@ -1,0 +1,13 @@
+# RSS Parsing
+feedparser>=6.0.10
+
+# AI / LangChain
+langchain>=0.3.0
+langchain-openai>=0.3.0
+langchain-core>=0.3.0
+
+# Telegram
+python-telegram-bot>=21.0
+
+# Optional: LangSmith tracing (set LANGCHAIN_TRACING_V2=true in Railway)
+# langsmith>=0.1.0
