@@ -1,18 +1,17 @@
 # main.py
 """
 ArchNews Monitor - Main Entry Point
-Central orchestrator for the architecture news monitoring application.
 
 Pipeline:
     1. Fetch RSS feed (get article URLs)
     2. Scrape full article content (Browserless)
-    3. Generate AI summaries (OpenAI)
-    4. Save to R2 storage (Cloudflare)
-    5. Send digest to Telegram
+    3. Download & save hero images to R2
+    4. Generate AI summaries (OpenAI)
+    5. Save articles to R2 storage (Cloudflare)
+    6. Send digest to Telegram
 
 Usage:
     python main.py              # Run full pipeline
-    python main.py --test       # Test all connections
     python main.py --rss-only   # Just fetch RSS (no scraping)
 """
 
@@ -36,80 +35,54 @@ from prompts.summarize import SUMMARIZE_PROMPT_TEMPLATE
 
 
 # =============================================================================
-# Connection Tests
+# Hero Image Processing
 # =============================================================================
 
-async def test_connections():
-    """Test all external service connections."""
-    print("🧪 Testing connections...\n")
+async def download_and_save_hero_images(
+    articles: list[dict], 
+    scraper: ArticleScraper, 
+    r2: R2Storage,
+    source: str = "archdaily"
+) -> list[dict]:
+    """Download hero images and save to R2 storage."""
+    print("\n🖼️ Step 2b: Downloading hero images...")
 
-    results = {"passed": 0, "failed": 0}
+    downloaded = 0
+    failed = 0
 
-    # Test 1: Telegram
-    print("📱 Testing Telegram...")
-    try:
-        bot = TelegramBot()
-        if await bot.test_connection():
-            results["passed"] += 1
-        else:
-            results["failed"] += 1
-    except Exception as e:
-        print(f"   ❌ Telegram error: {e}")
-        results["failed"] += 1
+    for i, article in enumerate(articles):
+        hero_image = article.get("hero_image")
 
-    # Test 2: R2 Storage
-    print("\n☁️ Testing Cloudflare R2...")
-    try:
-        r2 = R2Storage()
-        if r2.test_connection():
-            results["passed"] += 1
-        else:
-            results["failed"] += 1
-    except Exception as e:
-        print(f"   ❌ R2 error: {e}")
-        results["failed"] += 1
+        if not hero_image or not hero_image.get("url"):
+            continue
 
-    # Test 3: OpenAI API
-    print("\n🤖 Testing OpenAI API...")
-    try:
-        llm = create_llm()
-        # Quick test call
-        response = llm.invoke("Say 'OK' if you can hear me.")
-        if response:
-            print("   ✅ OpenAI API connected")
-            results["passed"] += 1
-        else:
-            results["failed"] += 1
-    except Exception as e:
-        print(f"   ❌ OpenAI error: {e}")
-        results["failed"] += 1
+        title_preview = article.get("title", "")[:40]
+        print(f"   [{i+1}/{len(articles)}] {title_preview}...")
 
-    # Test 4: Browserless (optional)
-    print("\n🌐 Testing Browserless...")
-    browserless_url = os.getenv('BROWSER_PLAYWRIGHT_ENDPOINT') or os.getenv('BROWSER_PLAYWRIGHT_ENDPOINT_PRIVATE')
-    if browserless_url:
         try:
-            scraper = ArticleScraper(browser_pool_size=1)
-            await scraper._initialize_browser_pool()
-            if scraper.session_active:
-                print("   ✅ Browserless connected")
-                results["passed"] += 1
+            image_bytes = await scraper.download_hero_image(hero_image)
+
+            if image_bytes:
+                updated_hero = r2.save_hero_image(
+                    image_bytes=image_bytes,
+                    article=article,
+                    source=source
+                )
+
+                if updated_hero:
+                    article["hero_image"] = updated_hero
+                    downloaded += 1
             else:
-                results["failed"] += 1
-            await scraper.close()
+                failed += 1
+
         except Exception as e:
-            print(f"   ❌ Browserless error: {e}")
-            results["failed"] += 1
-    else:
-        print("   ⚠️ Browserless not configured (BROWSER_PLAYWRIGHT_ENDPOINT not set)")
-        print("   ℹ️ Scraping will use RSS descriptions only")
+            print(f"      ⚠️ Error: {e}")
+            failed += 1
 
-    # Summary
-    print(f"\n{'=' * 40}")
-    print(f"✅ Passed: {results['passed']}")
-    print(f"❌ Failed: {results['failed']}")
+        await asyncio.sleep(0.3)
 
-    return results["failed"] == 0
+    print(f"   ✅ Downloaded {downloaded} hero images ({failed} failed)")
+    return articles
 
 
 # =============================================================================
@@ -117,23 +90,24 @@ async def test_connections():
 # =============================================================================
 
 async def run_pipeline(skip_scraping: bool = False):
-    """
-    Run the complete news monitoring pipeline.
-
-    Args:
-        skip_scraping: If True, use RSS descriptions instead of full scraping
-    """
+    """Run the complete news monitoring pipeline."""
     print(f"\n{'=' * 60}")
     print("🏛️ ArchNews Monitor")
     print(f"📅 {datetime.now().strftime('%B %d, %Y at %H:%M')}")
     print(f"{'=' * 60}")
 
     scraper = None
+    r2 = None
 
     try:
-        # =====================================================================
+        # Initialize R2 storage
+        try:
+            r2 = R2Storage()
+        except Exception as e:
+            print(f"⚠️ R2 not configured: {e}")
+            r2 = None
+
         # Step 1: Fetch RSS Feed
-        # =====================================================================
         print("\n📡 Step 1: Fetching RSS feed...")
         articles = fetch_rss_feed(ARCHDAILY_RSS_URL, HOURS_LOOKBACK)
 
@@ -143,9 +117,7 @@ async def run_pipeline(skip_scraping: bool = False):
 
         print(f"   ✅ Found {len(articles)} articles")
 
-        # =====================================================================
         # Step 2: Scrape Full Content (optional)
-        # =====================================================================
         if not skip_scraping and os.getenv('BROWSER_PLAYWRIGHT_ENDPOINT'):
             print("\n🌐 Step 2: Scraping full article content...")
 
@@ -155,13 +127,22 @@ async def run_pipeline(skip_scraping: bool = False):
                 articles = await scraper.scrape_articles(articles)
 
                 successful = sum(1 for a in articles if a.get("scrape_success"))
+                hero_count = sum(1 for a in articles if a.get("hero_image"))
                 print(f"   ✅ Scraped {successful}/{len(articles)} articles")
+                print(f"   ✅ Found {hero_count} hero images (og:image)")
 
-                # Use full_content for summarization if available
                 for article in articles:
                     if article.get("scrape_success") and article.get("full_content"):
-                        # Replace RSS description with full content (truncated)
                         article["description"] = article["full_content"][:2000]
+
+                # Step 2b: Download & Save Hero Images
+                if r2 and hero_count > 0:
+                    articles = await download_and_save_hero_images(
+                        articles=articles,
+                        scraper=scraper,
+                        r2=r2,
+                        source="archdaily"
+                    )
 
             except Exception as e:
                 print(f"   ⚠️ Scraping failed: {e}")
@@ -172,9 +153,7 @@ async def run_pipeline(skip_scraping: bool = False):
             else:
                 print("\n⏭️ Step 2: Skipping scraping (Browserless not configured)")
 
-        # =====================================================================
         # Step 3: Generate AI Summaries
-        # =====================================================================
         print("\n🤖 Step 3: Generating AI summaries...")
 
         llm = create_llm()
@@ -187,47 +166,58 @@ async def run_pipeline(skip_scraping: bool = False):
                 summarized_articles.append(summarized)
             except Exception as e:
                 print(f"   ⚠️ Summary failed: {e}")
-                # Fallback: use original description
                 article["ai_summary"] = article.get("description", "")[:200] + "..."
                 article["tags"] = []
                 summarized_articles.append(article)
 
         print(f"   ✅ Generated {len(summarized_articles)} summaries")
 
-        # =====================================================================
         # Step 4: Save to R2 Storage
-        # =====================================================================
         print("\n☁️ Step 4: Saving to Cloudflare R2...")
 
-        try:
-            r2 = R2Storage()
+        if r2:
+            try:
+                storage_articles = []
+                for article in summarized_articles:
+                    hero_image_data = None
+                    hero = article.get("hero_image")
+                    if hero:
+                        hero_image_data = {
+                            "url": hero.get("url"),
+                            "r2_path": hero.get("r2_path"),
+                            "r2_url": hero.get("r2_url"),
+                            "width": hero.get("width"),
+                            "height": hero.get("height"),
+                            "source": hero.get("source"),
+                        }
 
-            # Prepare data for storage (remove large full_content to save space)
-            storage_articles = []
-            for article in summarized_articles:
-                storage_article = {
-                    "title": article.get("title"),
-                    "link": article.get("link"),
-                    "published": article.get("published"),
-                    "guid": article.get("guid"),
-                    "ai_summary": article.get("ai_summary"),
-                    "tags": article.get("tags", []),
-                    "image_count": article.get("image_count", 0),
-                    "images": article.get("images", [])[:3],  # Keep only first 3 images
-                    "scrape_success": article.get("scrape_success", False),
-                }
-                storage_articles.append(storage_article)
+                    storage_article = {
+                        "title": article.get("title"),
+                        "link": article.get("link"),
+                        "published": article.get("published"),
+                        "guid": article.get("guid"),
+                        "ai_summary": article.get("ai_summary"),
+                        "tags": article.get("tags", []),
+                        "image_count": article.get("image_count", 0),
+                        "hero_image": hero_image_data,
+                        "images": article.get("images", [])[:3],
+                        "scrape_success": article.get("scrape_success", False),
+                    }
+                    storage_articles.append(storage_article)
 
-            storage_path = r2.save_articles(storage_articles, source="archdaily")
-            print(f"   ✅ Saved to: {storage_path}")
+                storage_path = r2.save_articles(storage_articles, source="archdaily")
+                print(f"   ✅ Saved to: {storage_path}")
 
-        except Exception as e:
-            print(f"   ⚠️ R2 storage failed: {e}")
-            print("   ℹ️ Continuing without storage...")
+                saved_heroes = sum(1 for a in storage_articles if a.get("hero_image", {}).get("r2_path"))
+                if saved_heroes > 0:
+                    print(f"   ✅ {saved_heroes} hero images saved to R2")
 
-        # =====================================================================
+            except Exception as e:
+                print(f"   ⚠️ R2 storage failed: {e}")
+        else:
+            print("   ⚠️ R2 not configured, skipping storage")
+
         # Step 5: Send to Telegram
-        # =====================================================================
         print("\n📱 Step 5: Sending Telegram digest...")
 
         try:
@@ -239,28 +229,25 @@ async def run_pipeline(skip_scraping: bool = False):
         except Exception as e:
             print(f"   ❌ Telegram error: {e}")
 
-        # =====================================================================
-        # Done!
-        # =====================================================================
+        # Done
         print(f"\n{'=' * 60}")
-        print("✅ Pipeline completed successfully!")
-        print(f"   📰 Articles processed: {len(summarized_articles)}")
+        print("✅ Pipeline completed!")
+        print(f"   📰 Articles: {len(summarized_articles)}")
+        hero_saved = sum(1 for a in summarized_articles if a.get("hero_image", {}).get("r2_path"))
+        if hero_saved > 0:
+            print(f"   🖼️ Hero images: {hero_saved}")
         print(f"{'=' * 60}")
 
     except Exception as e:
         print(f"\n❌ Pipeline error: {e}")
-
-        # Try to send error notification
         try:
             bot = TelegramBot()
             await bot.send_error_notification(f"Pipeline failed: {str(e)}")
         except:
             pass
-
         raise
 
     finally:
-        # Clean up scraper
         if scraper:
             await scraper.close()
 
@@ -269,53 +256,8 @@ async def run_pipeline(skip_scraping: bool = False):
 # Entry Point
 # =============================================================================
 
-async def main():
-    """Main entry point - handles command line arguments."""
-
-    # Parse arguments
-    if len(sys.argv) > 1:
-        arg = sys.argv[1]
-
-        if arg == "--test":
-            # Test all connections
-            success = await test_connections()
-            sys.exit(0 if success else 1)
-
-        elif arg == "--rss-only":
-            # Run without scraping
-            await run_pipeline(skip_scraping=True)
-
-        elif arg == "--help":
-            print("""
-ArchNews Monitor - Architecture News Aggregator
-
-Usage:
-    python main.py              Run full pipeline (RSS → Scrape → AI → R2 → Telegram)
-    python main.py --test       Test all service connections
-    python main.py --rss-only   Run without web scraping (faster, less content)
-    python main.py --help       Show this help message
-
-Environment Variables:
-    TELEGRAM_BOT_TOKEN          Telegram bot token
-    TELEGRAM_CHANNEL_ID         Target channel ID
-    OPENAI_API_KEY              OpenAI API key
-    R2_ACCOUNT_ID               Cloudflare account ID
-    R2_ACCESS_KEY_ID            R2 API access key
-    R2_SECRET_ACCESS_KEY        R2 API secret key
-    R2_BUCKET_NAME              R2 bucket name
-    BROWSER_PLAYWRIGHT_ENDPOINT Railway Browserless URL (optional)
-            """)
-            sys.exit(0)
-
-        else:
-            print(f"Unknown argument: {arg}")
-            print("Use --help for usage information")
-            sys.exit(1)
-
-    else:
-        # Default: run full pipeline
-        await run_pipeline()
-
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    if len(sys.argv) > 1 and sys.argv[1] == "--rss-only":
+        asyncio.run(run_pipeline(skip_scraping=True))
+    else:
+        asyncio.run(run_pipeline())

@@ -7,11 +7,12 @@ Features:
 - Persistent browser sessions for efficiency
 - Connection pooling (reuses browsers across URLs)
 - Aggressive ad/tracker blocking for speed
-- Image extraction support (for Telegram posts)
+- Hero image extraction from og:image meta tags
+- Image downloading for R2 storage
 
 Usage:
     from operators.scraper import ArticleScraper
-    
+
     scraper = ArticleScraper()
     articles = await scraper.scrape_articles(article_list)
     await scraper.close()
@@ -50,7 +51,7 @@ class ArticleScraper:
     def __init__(self, browser_pool_size: int = 2):
         """
         Initialize the article scraper.
-        
+
         Args:
             browser_pool_size: Number of concurrent browsers (2-3 recommended)
         """
@@ -73,7 +74,7 @@ class ArticleScraper:
         # Timeout settings (in milliseconds)
         self.default_timeout = 20000  # 20 seconds
         self.browser_launch_timeout = 25000  # 25 seconds
-        
+
         # Domain-specific timeouts for slower sites
         self.domain_timeouts = {
             'archdaily.com': 25000,
@@ -95,6 +96,7 @@ class ArticleScraper:
             "browser_reuses": 0,
             "total_time": 0.0,
             "images_extracted": 0,
+            "hero_images_found": 0,
         }
 
         # Log configuration
@@ -194,7 +196,7 @@ class ArticleScraper:
         """Reconnect a failed browser in the pool."""
         try:
             logger.info(f"🔄 Reconnecting browser-{index}...")
-            
+
             # Close old browser if exists
             if index < len(self.browser_pool) and self.browser_pool[index]:
                 try:
@@ -222,12 +224,12 @@ class ArticleScraper:
     async def scrape_articles(self, articles: List[Dict]) -> List[Dict]:
         """
         Scrape full content for a list of articles.
-        
+
         Args:
             articles: List of article dicts with 'link' key
-            
+
         Returns:
-            Same list with added 'full_content', 'images', 'scrape_success' keys
+            Same list with added 'full_content', 'images', 'hero_image', 'scrape_success' keys
         """
         if not articles:
             logger.warning("📭 No articles to scrape")
@@ -260,6 +262,7 @@ class ArticleScraper:
                 article.update({
                     "full_content": "",
                     "images": [],
+                    "hero_image": None,
                     "scrape_success": False,
                     "scrape_error": str(result)
                 })
@@ -276,7 +279,8 @@ class ArticleScraper:
         self.stats["browser_reuses"] += max(0, len(articles) - self.browser_pool_size)
 
         success_count = sum(1 for a in scraped_articles if a.get("scrape_success"))
-        logger.info(f"✅ Scraping complete: {success_count}/{len(articles)} successful in {total_time:.1f}s")
+        hero_count = sum(1 for a in scraped_articles if a.get("hero_image"))
+        logger.info(f"✅ Scraping complete: {success_count}/{len(articles)} successful, {hero_count} hero images in {total_time:.1f}s")
 
         return scraped_articles
 
@@ -293,11 +297,11 @@ class ArticleScraper:
     async def _scrape_single_article(self, article: Dict, browser_index: int) -> Dict:
         """
         Scrape a single article URL.
-        
+
         Args:
             article: Article dict with 'link' key
             browser_index: Which browser from pool to use
-            
+
         Returns:
             Article dict with scraped content added
         """
@@ -340,29 +344,37 @@ class ArticleScraper:
                 # Dismiss popups/overlays
                 await self._dismiss_overlays(page)
 
+                # Extract hero image (og:image) - do this FIRST before any DOM manipulation
+                hero_image = await self._extract_hero_image(page, url)
+
                 # Extract content
                 content = await self._extract_article_content(page, url)
 
-                # Extract images
+                # Extract all images (for reference)
                 images = await self._extract_images(page, url)
 
                 if content and len(content.strip()) > 100:
                     processing_time = time.time() - start_time
-                    
+
                     result.update({
                         "full_content": content,
                         "images": images,
                         "image_count": len(images),
+                        "hero_image": hero_image,
                         "scrape_success": True,
                         "scrape_time": processing_time,
                         "content_length": len(content),
                     })
-                    
-                    logger.info(f"   ✅ Success: {len(content)} chars, {len(images)} images in {processing_time:.1f}s")
+
+                    if hero_image:
+                        self.stats["hero_images_found"] += 1
+
+                    logger.info(f"   ✅ Success: {len(content)} chars, {len(images)} images, hero: {'✓' if hero_image else '✗'} in {processing_time:.1f}s")
                 else:
                     result.update({
                         "full_content": "",
                         "images": [],
+                        "hero_image": hero_image,  # Still save hero image even if content extraction failed
                         "scrape_success": False,
                         "scrape_error": "Content too short or empty"
                     })
@@ -375,6 +387,7 @@ class ArticleScraper:
             result.update({
                 "full_content": "",
                 "images": [],
+                "hero_image": None,
                 "scrape_success": False,
                 "scrape_error": "Timeout"
             })
@@ -384,6 +397,7 @@ class ArticleScraper:
             result.update({
                 "full_content": "",
                 "images": [],
+                "hero_image": None,
                 "scrape_success": False,
                 "scrape_error": str(e)
             })
@@ -421,7 +435,7 @@ class ArticleScraper:
                     `;
                     document.head.appendChild(style);
                 });
-                
+
                 // Block popups
                 window.alert = window.confirm = window.prompt = () => {};
                 window.open = () => null;
@@ -451,7 +465,7 @@ class ArticleScraper:
             'hotjar', 'mixpanel', 'segment.io',
             'optimizely', 'crazyegg', 'mouseflow',
         ]
-        
+
         if any(domain in url for domain in blocked_domains):
             await route.abort()
             return
@@ -469,7 +483,7 @@ class ArticleScraper:
             'button[class*="consent"]',
             '[class*="cookie"] button',
             '[class*="gdpr"] button',
-            
+
             # Generic close/accept buttons
             'button:has-text("Accept")',
             'button:has-text("Accept All")',
@@ -490,6 +504,168 @@ class ArticleScraper:
                     break
             except:
                 continue
+
+    # =========================================================================
+    # Hero Image Extraction (og:image)
+    # =========================================================================
+
+    async def _extract_hero_image(self, page: Page, base_url: str) -> Optional[Dict]:
+        """
+        Extract hero image from Open Graph meta tags.
+        This is the image used for social sharing (Telegram, Twitter, Facebook).
+
+        Priority:
+            1. og:image (Open Graph - most common)
+            2. twitter:image (Twitter Cards)
+            3. First large image in article
+
+        Args:
+            page: Playwright page object
+            base_url: Article URL for resolving relative paths
+
+        Returns:
+            Dict with 'url', 'width', 'height', 'alt' or None
+        """
+        try:
+            hero_data = await page.evaluate("""
+                (baseUrl) => {
+                    // Helper to resolve relative URLs
+                    function resolveUrl(url) {
+                        if (!url) return null;
+                        if (url.startsWith('http')) return url;
+                        if (url.startsWith('//')) return 'https:' + url;
+                        try {
+                            return new URL(url, baseUrl).href;
+                        } catch {
+                            return null;
+                        }
+                    }
+
+                    // Try og:image first (most reliable for social sharing)
+                    const ogImage = document.querySelector('meta[property="og:image"]');
+                    if (ogImage) {
+                        const url = resolveUrl(ogImage.content);
+                        if (url) {
+                            // Try to get dimensions from og:image:width/height
+                            const ogWidth = document.querySelector('meta[property="og:image:width"]');
+                            const ogHeight = document.querySelector('meta[property="og:image:height"]');
+                            const ogAlt = document.querySelector('meta[property="og:image:alt"]');
+
+                            return {
+                                url: url,
+                                width: ogWidth ? parseInt(ogWidth.content) : null,
+                                height: ogHeight ? parseInt(ogHeight.content) : null,
+                                alt: ogAlt ? ogAlt.content : '',
+                                source: 'og:image'
+                            };
+                        }
+                    }
+
+                    // Try twitter:image
+                    const twitterImage = document.querySelector('meta[name="twitter:image"]') ||
+                                         document.querySelector('meta[property="twitter:image"]');
+                    if (twitterImage) {
+                        const url = resolveUrl(twitterImage.content);
+                        if (url) {
+                            return {
+                                url: url,
+                                width: null,
+                                height: null,
+                                alt: '',
+                                source: 'twitter:image'
+                            };
+                        }
+                    }
+
+                    // Fallback: try to find schema.org image
+                    const schemaImage = document.querySelector('meta[itemprop="image"]');
+                    if (schemaImage) {
+                        const url = resolveUrl(schemaImage.content);
+                        if (url) {
+                            return {
+                                url: url,
+                                width: null,
+                                height: null,
+                                alt: '',
+                                source: 'schema.org'
+                            };
+                        }
+                    }
+
+                    // Last resort: link rel="image_src"
+                    const linkImage = document.querySelector('link[rel="image_src"]');
+                    if (linkImage) {
+                        const url = resolveUrl(linkImage.href);
+                        if (url) {
+                            return {
+                                url: url,
+                                width: null,
+                                height: null,
+                                alt: '',
+                                source: 'link:image_src'
+                            };
+                        }
+                    }
+
+                    return null;
+                }
+            """, base_url)
+
+            if hero_data and hero_data.get('url'):
+                logger.info(f"   🖼️ Hero image found via {hero_data.get('source', 'unknown')}")
+                return hero_data
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Hero image extraction error: {e}")
+            return None
+
+    async def download_hero_image(self, hero_image: Dict, context: BrowserContext = None) -> Optional[bytes]:
+        """
+        Download hero image bytes for storage.
+
+        Args:
+            hero_image: Dict with 'url' key
+            context: Browser context to use (optional)
+
+        Returns:
+            Image bytes or None if failed
+        """
+        if not hero_image or not hero_image.get('url'):
+            return None
+
+        url = hero_image['url']
+
+        try:
+            # Use provided context or create new one
+            if context is None:
+                if not self.browser_contexts:
+                    logger.warning("No browser context available for image download")
+                    return None
+                context = self.browser_contexts[0]
+
+            # Create a new page for downloading
+            page = await context.new_page()
+
+            try:
+                # Fetch the image
+                response = await page.goto(url, timeout=15000)
+
+                if response and response.ok:
+                    image_bytes = await response.body()
+                    logger.info(f"   📥 Downloaded hero image: {len(image_bytes)} bytes")
+                    return image_bytes
+                else:
+                    logger.warning(f"   ⚠️ Failed to download hero image: HTTP {response.status if response else 'no response'}")
+                    return None
+
+            finally:
+                await page.close()
+
+        except Exception as e:
+            logger.error(f"   ❌ Hero image download error: {e}")
+            return None
 
     # =========================================================================
     # Content Extraction
@@ -544,7 +720,7 @@ class ArticleScraper:
                         if (element) {
                             // Clone to avoid modifying original
                             const clone = element.cloneNode(true);
-                            
+
                             // Remove unwanted elements
                             const removeSelectors = [
                                 'script', 'style', 'nav', 'header', 'footer',
@@ -553,23 +729,23 @@ class ArticleScraper:
                                 '.newsletter', '.sidebar', '[role="complementary"]',
                                 '.breadcrumb', '.pagination', '.author-bio'
                             ];
-                            
+
                             removeSelectors.forEach(sel => {
                                 clone.querySelectorAll(sel).forEach(el => el.remove());
                             });
-                            
+
                             const text = clone.innerText || clone.textContent || '';
                             if (text.trim().length > 200) {
                                 return text.trim();
                             }
                         }
                     }
-                    
+
                     // Fallback: get body text
                     const body = document.body.cloneNode(true);
                     ['script', 'style', 'nav', 'header', 'footer', 'aside']
                         .forEach(tag => body.querySelectorAll(tag).forEach(el => el.remove()));
-                    
+
                     return (body.innerText || body.textContent || '').trim().substring(0, 10000);
                 }
             """, selectors)
@@ -594,7 +770,7 @@ class ArticleScraper:
         # Remove excessive whitespace
         content = re.sub(r'\n\s*\n+', '\n\n', content)
         content = re.sub(r'[ \t]+', ' ', content)
-        
+
         # Remove common junk phrases
         junk_patterns = [
             r'cookie\s*(policy|consent|notice)',
@@ -606,20 +782,20 @@ class ArticleScraper:
             r'advertisement',
             r'sponsored\s*content',
         ]
-        
+
         for pattern in junk_patterns:
             content = re.sub(pattern, '', content, flags=re.IGNORECASE)
 
         return content.strip()
 
     # =========================================================================
-    # Image Extraction
+    # Image Extraction (all images)
     # =========================================================================
 
     async def _extract_images(self, page: Page, base_url: str) -> List[Dict]:
         """
         Extract article images for Telegram posts.
-        
+
         Returns:
             List of image dicts with 'url', 'alt', 'width', 'height'
         """
@@ -628,7 +804,7 @@ class ArticleScraper:
                 (baseUrl) => {
                     const images = [];
                     const seen = new Set();
-                    
+
                     // Selectors for article images (prioritized)
                     const selectors = [
                         'article img',
@@ -638,20 +814,20 @@ class ArticleScraper:
                         '.post-content img',
                         '.entry-content img',
                     ];
-                    
+
                     // Collect images
                     for (const selector of selectors) {
                         document.querySelectorAll(selector).forEach(img => {
                             let src = img.src || img.dataset.src || img.dataset.lazySrc || '';
-                            
+
                             // Skip if no src or already seen
                             if (!src || seen.has(src)) return;
-                            
+
                             // Skip tiny images, icons, logos
                             const width = img.naturalWidth || img.width || 0;
                             const height = img.naturalHeight || img.height || 0;
                             if (width < 200 || height < 150) return;
-                            
+
                             // Skip common non-content images
                             const srcLower = src.toLowerCase();
                             if (srcLower.includes('logo') || 
@@ -660,7 +836,7 @@ class ArticleScraper:
                                 srcLower.includes('advertisement') ||
                                 srcLower.includes('banner') ||
                                 srcLower.includes('placeholder')) return;
-                            
+
                             seen.add(src);
                             images.push({
                                 url: src,
@@ -670,7 +846,7 @@ class ArticleScraper:
                             });
                         });
                     }
-                    
+
                     return images.slice(0, 10);  // Limit to 10 images
                 }
             """, base_url)
@@ -690,12 +866,12 @@ class ArticleScraper:
     async def get_hero_image(self, page: Page, base_url: str) -> Optional[Dict]:
         """
         Get the main/hero image for Telegram post thumbnail.
-        
+
         Returns:
             Single image dict or None
         """
         images = await self._extract_images(page, base_url)
-        
+
         if not images:
             return None
 
@@ -725,6 +901,7 @@ class ArticleScraper:
             logger.info(f"   Success rate: {stats.get('success_rate', 0):.1f}%")
             logger.info(f"   Browser reuses: {stats['browser_reuses']}")
             logger.info(f"   Images extracted: {stats['images_extracted']}")
+            logger.info(f"   Hero images found: {stats['hero_images_found']}")
             logger.info(f"   Total time: {stats['total_time']:.1f}s")
             logger.info("=" * 50)
 
@@ -765,22 +942,23 @@ class ArticleScraper:
 async def test_scraper():
     """Test the scraper with a sample URL."""
     print("🧪 Testing Article Scraper...")
-    
+
     scraper = ArticleScraper(browser_pool_size=1)
-    
+
     try:
         test_articles = [
             {"link": "https://www.archdaily.com", "title": "Test Article"}
         ]
-        
+
         results = await scraper.scrape_articles(test_articles)
-        
+
         for article in results:
             print(f"\n📰 {article.get('title', 'No title')}")
             print(f"   Success: {article.get('scrape_success', False)}")
             print(f"   Content length: {len(article.get('full_content', ''))}")
             print(f"   Images: {len(article.get('images', []))}")
-            
+            print(f"   Hero image: {article.get('hero_image', {}).get('url', 'None')[:60] if article.get('hero_image') else 'None'}")
+
     finally:
         await scraper.close()
 
