@@ -1,10 +1,15 @@
 # config/sources.py
 """
 News Source Registry
-Central configuration for all monitored news sources.
+Central configuration for all monitored architecture and design news sources.
+
+Organization:
+    - Tier 1: Global Primary Sources (high volume, daily monitoring)
+    - Tier 2: Regional Sources (organized by geography)
 
 Usage:
     from config.sources import get_source_name, get_source_config, SOURCES
+    from config.sources import get_sources_by_tier, get_sources_by_region
 """
 
 from urllib.parse import urlparse
@@ -12,131 +17,236 @@ from typing import Optional
 
 
 # =============================================================================
-# Source Configuration
-# Each source has: name, domains, rss_url (optional), scrape_config (optional)
+# Source Configuration - 20 Working Sources
 # =============================================================================
 
 SOURCES = {
+    # =========================================================================
+    # TIER 1 - Global Primary Sources
+    # =========================================================================
+
     "archdaily": {
         "name": "ArchDaily",
         "domains": ["archdaily.com", "www.archdaily.com"],
         "rss_url": "https://feeds.feedburner.com/Archdaily",
+        "tier": 1,
+        "region": "global",
         "scrape_timeout": 25000,
     },
     "dezeen": {
         "name": "Dezeen",
         "domains": ["dezeen.com", "www.dezeen.com"],
-        # Using Feedburner URL - dezeen.com/feed/ returns 403
         "rss_url": "http://feeds.feedburner.com/dezeen",
+        "tier": 1,
+        "region": "uk",
         "scrape_timeout": 25000,
     },
     "designboom": {
         "name": "Designboom",
         "domains": ["designboom.com", "www.designboom.com"],
-        "rss_url": "https://www.designboom.com/feed/",
+        "rss_url": "https://www.designboom.com/feed",
+        "tier": 1,
+        "region": "italy",
         "scrape_timeout": 20000,
     },
-    "domus": {
-        "name": "Domus",
-        "domains": ["domusweb.it", "www.domusweb.it"],
-        "rss_url": "https://www.domusweb.it/en.rss.xml",
+    "architects_journal": {
+        "name": "The Architects' Journal",
+        "domains": ["architectsjournal.co.uk", "www.architectsjournal.co.uk"],
+        "rss_url": "https://www.architectsjournal.co.uk/feed",
+        "tier": 1,
+        "region": "uk",
         "scrape_timeout": 20000,
     },
-    "architizer": {
-        "name": "Architizer",
-        "domains": ["architizer.com", "www.architizer.com"],
-        "rss_url": None,  # No RSS available
+
+    # =========================================================================
+    # TIER 2 - North America
+    # =========================================================================
+
+    "metropolis": {
+        "name": "Metropolis",
+        "domains": ["metropolismag.com", "www.metropolismag.com"],
+        "rss_url": "https://metropolismag.com/feed/",
+        "tier": 2,
+        "region": "north_america",
         "scrape_timeout": 20000,
     },
-    "archpaper": {
-        "name": "The Architect's Newspaper",
-        "domains": ["archpaper.com", "www.archpaper.com"],
-        "rss_url": "https://www.archpaper.com/feed/",
-        "scrape_timeout": 18000,
-    },
-    "architectural_digest": {
-        "name": "Architectural Digest",
-        "domains": ["architecturaldigest.com", "www.architecturaldigest.com"],
-        "rss_url": "https://www.architecturaldigest.com/feed/rss",
+    "canadian_architect": {
+        "name": "Canadian Architect",
+        "domains": ["canadianarchitect.com", "www.canadianarchitect.com"],
+        "rss_url": "https://www.canadianarchitect.com/feed/",
+        "tier": 2,
+        "region": "north_america",
         "scrape_timeout": 20000,
     },
-    "architect_magazine": {
-        "name": "Architect Magazine",
-        "domains": ["architectmagazine.com", "www.architectmagazine.com"],
-        "rss_url": "https://www.architectmagazine.com/rss",
+    "design_milk": {
+        "name": "Design Milk",
+        "domains": ["design-milk.com", "www.design-milk.com"],
+        "rss_url": "http://feeds.feedburner.com/design-milk",
+        "tier": 2,
+        "region": "north_america",
+        "category": "design_culture",
         "scrape_timeout": 20000,
     },
-    "wallpaper": {
-        "name": "Wallpaper",
-        "domains": ["wallpaper.com", "www.wallpaper.com"],
-        "rss_url": "https://www.wallpaper.com/rss",
+    "leibal": {
+        "name": "Leibal",
+        "domains": ["leibal.com", "www.leibal.com"],
+        "rss_url": "https://leibal.com/feed/",
+        "tier": 2,
+        "region": "north_america",
+        "category": "minimalism",
         "scrape_timeout": 20000,
     },
-    "afasia": {
-        "name": "Afasia",
-        "domains": ["afasiaarchzine.com", "www.afasiaarchzine.com"],
-        "rss_url": "https://afasiaarchzine.com/feed/",
-        "scrape_timeout": 15000,
-    },
-    "divisare": {
-        "name": "Divisare",
-        "domains": ["divisare.com", "www.divisare.com"],
-        "rss_url": "https://divisare.com/feed",
+    "construction_specifier": {
+        "name": "The Construction Specifier",
+        "domains": ["constructionspecifier.com", "www.constructionspecifier.com"],
+        "rss_url": "https://www.constructionspecifier.com/feed/",
+        "tier": 2,
+        "region": "north_america",
+        "category": "technical",
         "scrape_timeout": 20000,
     },
-    "curbed": {
-        "name": "Curbed",
-        "domains": ["curbed.com", "www.curbed.com"],
-        "rss_url": "https://www.curbed.com/rss/index.xml",
+
+    # =========================================================================
+    # TIER 2 - Europe
+    # =========================================================================
+
+    "architectural_review": {
+        "name": "The Architectural Review",
+        "domains": ["architectural-review.com", "www.architectural-review.com"],
+        "rss_url": "https://www.architectural-review.com/feed",
+        "tier": 2,
+        "region": "europe",
+        "category": "critique",
         "scrape_timeout": 20000,
     },
-    "dwell": {
-        "name": "Dwell",
-        "domains": ["dwell.com", "www.dwell.com"],
-        "rss_url": "https://www.dwell.com/rss",
+    "landezine": {
+        "name": "Landezine",
+        "domains": ["landezine.com", "www.landezine.com"],
+        "rss_url": "http://www.landezine.com/feed",
+        "tier": 2,
+        "region": "europe",
+        "category": "landscape",
+        "scrape_timeout": 20000,
+    },
+    "aasarchitecture": {
+        "name": "A As Architecture",
+        "domains": ["aasarchitecture.com", "www.aasarchitecture.com"],
+        "rss_url": "https://aasarchitecture.com/feed/",
+        "tier": 2,
+        "region": "europe",
+        "scrape_timeout": 20000,
+    },
+
+    # =========================================================================
+    # TIER 2 - Asia-Pacific
+    # =========================================================================
+
+    "yellowtrace": {
+        "name": "Yellowtrace",
+        "domains": ["yellowtrace.com.au", "www.yellowtrace.com.au"],
+        "rss_url": "https://www.yellowtrace.com.au/feed",
+        "tier": 2,
+        "region": "asia_pacific",
+        "scrape_timeout": 20000,
+    },
+    "architectureau": {
+        "name": "ArchitectureAU",
+        "domains": ["architectureau.com", "www.architectureau.com"],
+        "rss_url": "https://architectureau.com/rss.xml",
+        "tier": 2,
+        "region": "asia_pacific",
+        "scrape_timeout": 20000,
+    },
+    "architecture_now": {
+        "name": "Architecture Now",
+        "domains": ["architecturenow.co.nz", "www.architecturenow.co.nz"],
+        "rss_url": "https://architecturenow.co.nz/rss.xml",
+        "tier": 2,
+        "region": "asia_pacific",
+        "scrape_timeout": 20000,
+    },
+    "architecture_update": {
+        "name": "Architecture Update",
+        "domains": ["architectureupdate.in", "www.architectureupdate.in"],
+        "rss_url": "https://architectureupdate.in/feed",
+        "tier": 2,
+        "region": "asia_pacific",
+        "scrape_timeout": 20000,
+    },
+    "indesignlive_sg": {
+        "name": "Indesign Live Singapore",
+        "domains": ["indesignlive.sg", "www.indesignlive.sg"],
+        "rss_url": "https://www.indesignlive.sg/feed",
+        "tier": 2,
+        "region": "asia_pacific",
+        "scrape_timeout": 20000,
+    },
+
+    # =========================================================================
+    # TIER 2 - Latin America
+    # =========================================================================
+
+    "archdaily_brasil": {
+        "name": "ArchDaily Brasil",
+        "domains": ["archdaily.com.br", "www.archdaily.com.br"],
+        "rss_url": "https://www.archdaily.com.br/br/feed",
+        "tier": 2,
+        "region": "latin_america",
+        "scrape_timeout": 25000,
+    },
+    "arquine": {
+        "name": "Arquine",
+        "domains": ["arquine.com", "www.arquine.com"],
+        "rss_url": "https://arquine.com/feed/",
+        "tier": 2,
+        "region": "latin_america",
+        "scrape_timeout": 20000,
+    },
+
+    # =========================================================================
+    # TIER 2 - Middle East
+    # =========================================================================
+
+    "parametric_architecture": {
+        "name": "Parametric Architecture",
+        "domains": ["parametric-architecture.com", "www.parametric-architecture.com"],
+        "rss_url": "https://parametric-architecture.com/feed/",
+        "tier": 2,
+        "region": "middle_east",
+        "category": "computational",
         "scrape_timeout": 20000,
     },
 }
 
 
-# Build domain-to-source lookup table
+# =============================================================================
+# Build Lookup Tables
+# =============================================================================
+
 _DOMAIN_TO_SOURCE = {}
 for source_id, config in SOURCES.items():
     for domain in config["domains"]:
         _DOMAIN_TO_SOURCE[domain.lower()] = source_id
 
 
+# =============================================================================
+# Core Functions
+# =============================================================================
+
 def get_source_id(url: str) -> Optional[str]:
-    """
-    Get source ID from URL.
-
-    Args:
-        url: Article URL
-
-    Returns:
-        Source ID (e.g., 'archdaily') or None if not recognized
-    """
+    """Get source ID from URL."""
     if not url:
         return None
-
     try:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
         return _DOMAIN_TO_SOURCE.get(domain)
-    except:
+    except Exception:
         return None
 
 
 def get_source_name(url: str) -> str:
-    """
-    Get display name for a source URL.
-
-    Args:
-        url: Article URL
-
-    Returns:
-        Human-readable source name (e.g., 'ArchDaily')
-    """
+    """Get display name for a source URL."""
     if not url:
         return "Source"
 
@@ -152,48 +262,31 @@ def get_source_name(url: str) -> str:
         parts = domain.split(".")
         if parts:
             return parts[0].capitalize()
-    except:
+    except Exception:
         pass
 
     return "Source"
 
 
 def get_source_config(source_id: str) -> Optional[dict]:
-    """
-    Get full configuration for a source.
-
-    Args:
-        source_id: Source ID (e.g., 'archdaily')
-
-    Returns:
-        Source config dict or None
-    """
+    """Get full configuration for a source."""
     return SOURCES.get(source_id)
 
 
 def get_source_rss(source_id: str) -> Optional[str]:
-    """
-    Get RSS URL for a source.
-
-    Args:
-        source_id: Source ID
-
-    Returns:
-        RSS feed URL or None
-    """
+    """Get RSS URL for a source."""
     config = SOURCES.get(source_id)
     if config:
         return config.get("rss_url")
     return None
 
 
-def get_all_rss_sources() -> list[dict]:
-    """
-    Get all sources that have RSS feeds.
+# =============================================================================
+# Filtering Functions
+# =============================================================================
 
-    Returns:
-        List of dicts with 'id', 'name', 'rss_url'
-    """
+def get_all_rss_sources() -> list[dict]:
+    """Get all sources that have RSS feeds."""
     result = []
     for source_id, config in SOURCES.items():
         if config.get("rss_url"):
@@ -201,8 +294,46 @@ def get_all_rss_sources() -> list[dict]:
                 "id": source_id,
                 "name": config["name"],
                 "rss_url": config["rss_url"],
+                "tier": config.get("tier", 2),
+                "region": config.get("region", "global"),
             })
     return result
+
+
+def get_sources_by_tier(tier: int) -> list[dict]:
+    """Get all sources for a specific tier."""
+    result = []
+    for source_id, config in SOURCES.items():
+        if config.get("tier") == tier and config.get("rss_url"):
+            result.append({"id": source_id, **config})
+    return result
+
+
+def get_sources_by_region(region: str) -> list[dict]:
+    """Get all sources for a specific region."""
+    result = []
+    for source_id, config in SOURCES.items():
+        if config.get("region") == region and config.get("rss_url"):
+            result.append({"id": source_id, **config})
+    return result
+
+
+def get_source_stats() -> dict:
+    """Get statistics about configured sources."""
+    stats = {
+        "total": len(SOURCES),
+        "by_tier": {},
+        "by_region": {},
+    }
+
+    for config in SOURCES.values():
+        tier = config.get("tier", 2)
+        region = config.get("region", "unknown")
+
+        stats["by_tier"][tier] = stats["by_tier"].get(tier, 0) + 1
+        stats["by_region"][region] = stats["by_region"].get(region, 0) + 1
+
+    return stats
 
 
 # =============================================================================
@@ -210,25 +341,21 @@ def get_all_rss_sources() -> list[dict]:
 # =============================================================================
 
 if __name__ == "__main__":
-    # Test source lookup
-    test_urls = [
-        "https://www.archdaily.com/123456/some-article",
-        "https://dezeen.com/2024/01/15/building-project",
-        "https://www.domusweb.it/en/architecture/2024/project.html",
-        "https://unknown-site.com/article",
-    ]
-
-    print("Source Registry Test")
+    print("=" * 50)
+    print("Architecture News Sources")
     print("=" * 50)
 
-    for url in test_urls:
-        name = get_source_name(url)
-        source_id = get_source_id(url)
-        print(f"{url[:40]}...")
-        print(f"  -> Name: {name}, ID: {source_id}")
-        print()
+    stats = get_source_stats()
+    print(f"\nTotal sources: {stats['total']}")
 
-    print("RSS Sources:")
-    print("=" * 50)
+    print("\nBy Tier:")
+    for tier, count in sorted(stats["by_tier"].items()):
+        print(f"  Tier {tier}: {count} sources")
+
+    print("\nBy Region:")
+    for region, count in sorted(stats["by_region"].items()):
+        print(f"  {region}: {count}")
+
+    print("\nAll Sources:")
     for source in get_all_rss_sources():
-        print(f"  {source['name']}: {source['rss_url'][:50]}...")
+        print(f"  {source['id']:25} [{source['tier']}] {source['name']}")
