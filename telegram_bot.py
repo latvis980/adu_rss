@@ -11,6 +11,7 @@ Usage:
 """
 
 import os
+import re
 import asyncio
 from datetime import datetime
 from telegram import Bot
@@ -42,6 +43,55 @@ class TelegramBot:
 
         self.bot = Bot(token=self.token)
 
+    @staticmethod
+    def _escape_markdown(text: str) -> str:
+        """
+        Escape special Markdown characters for Telegram.
+
+        Telegram's legacy Markdown mode uses these special characters:
+        - _ for italic
+        - * for bold
+        - ` for code
+        - [ for links
+
+        Args:
+            text: Raw text to escape
+
+        Returns:
+            Text with escaped Markdown characters
+        """
+        if not text:
+            return ""
+
+        # Characters that need escaping in Telegram Markdown
+        # Order matters: escape backslash first to avoid double-escaping
+        escape_chars = ['_', '*', '[', ']', '`']
+
+        result = text
+        for char in escape_chars:
+            result = result.replace(char, f'\\{char}')
+
+        return result
+
+    @staticmethod
+    def _escape_url(url: str) -> str:
+        """
+        Escape special characters in URLs for Markdown links.
+
+        Parentheses in URLs break Markdown link syntax.
+
+        Args:
+            url: URL to escape
+
+        Returns:
+            URL with escaped parentheses
+        """
+        if not url:
+            return ""
+
+        # Escape parentheses which break Markdown link syntax
+        return url.replace('(', '%28').replace(')', '%29')
+
     async def send_message(
         self, 
         text: str, 
@@ -69,7 +119,19 @@ class TelegramBot:
             return True
         except TelegramError as e:
             print(f"[ERROR] Telegram error: {e}")
-            return False
+            # Try sending without parse mode as fallback
+            try:
+                await self.bot.send_message(
+                    chat_id=self.channel_id,
+                    text=text,
+                    parse_mode=None,
+                    disable_web_page_preview=disable_preview
+                )
+                print("[INFO] Sent without formatting as fallback")
+                return True
+            except TelegramError as e2:
+                print(f"[ERROR] Fallback also failed: {e2}")
+                return False
 
     async def send_photo(
         self,
@@ -98,7 +160,19 @@ class TelegramBot:
             return True
         except TelegramError as e:
             print(f"[ERROR] Telegram photo error: {e}")
-            return False
+            # Try sending without parse mode as fallback
+            try:
+                await self.bot.send_photo(
+                    chat_id=self.channel_id,
+                    photo=photo_url,
+                    caption=caption,
+                    parse_mode=None
+                )
+                print("[INFO] Sent photo without formatting as fallback")
+                return True
+            except TelegramError as e2:
+                print(f"[ERROR] Photo fallback also failed: {e2}")
+                return False
 
     async def send_digest(
         self, 
@@ -201,7 +275,9 @@ class TelegramBot:
         Returns:
             True if sent successfully
         """
-        text = f"*System Alert*\n\n{error_message}"
+        # Escape the error message to prevent Markdown issues
+        escaped_message = self._escape_markdown(error_message)
+        text = f"*System Alert*\n\n{escaped_message}"
         return await self.send_message(text, disable_preview=True)
 
     async def send_status_update(self, status: str) -> bool:
@@ -214,7 +290,9 @@ class TelegramBot:
         Returns:
             True if sent successfully
         """
-        return await self.send_message(status, disable_preview=True)
+        # Escape status message
+        escaped_status = self._escape_markdown(status)
+        return await self.send_message(escaped_status, disable_preview=True)
 
     def _format_header(self, article_count: int) -> str:
         """Format digest header message."""
@@ -226,7 +304,7 @@ class TelegramBot:
 
     def _format_article(self, article: dict) -> str:
         """
-        Format single article message.
+        Format single article message with proper Markdown escaping.
 
         Format:
             Summary text here.
@@ -242,18 +320,28 @@ class TelegramBot:
         # Get source display name
         source_name = get_source_name(url)
 
-        # Build message - start with summary only (no title)
-        message = summary
+        # Escape special Markdown characters in summary
+        escaped_summary = self._escape_markdown(summary)
+
+        # Build message - start with escaped summary
+        message = escaped_summary
 
         # Add tags if present
         if tags:
             if isinstance(tags, list):
                 # Clean tags: lowercase, replace spaces with underscores
+                # Tags with # don't need escaping as # is not a Markdown char
                 cleaned_tags = []
                 for tag in tags:
                     if tag:
-                        clean_tag = tag.strip().lower().replace(" ", "_")
-                        cleaned_tags.append(f"#{clean_tag}")
+                        # Remove any special characters from tags
+                        clean_tag = tag.strip().lower()
+                        # Replace spaces with underscores
+                        clean_tag = clean_tag.replace(" ", "_")
+                        # Remove any remaining Markdown special chars from tag
+                        clean_tag = re.sub(r'[_*\[\]`]', '', clean_tag)
+                        if clean_tag:
+                            cleaned_tags.append(f"#{clean_tag}")
                 tags_str = " ".join(cleaned_tags)
             else:
                 tags_str = str(tags)
@@ -261,9 +349,11 @@ class TelegramBot:
             if tags_str:
                 message += f"\n\n{tags_str}"
 
-        # Add source link
+        # Add source link with escaped source name and URL
         if url:
-            message += f"\n\n[{source_name}]({url})"
+            escaped_source = self._escape_markdown(source_name)
+            escaped_url = self._escape_url(url)
+            message += f"\n\n[{escaped_source}]({escaped_url})"
 
         return message
 
