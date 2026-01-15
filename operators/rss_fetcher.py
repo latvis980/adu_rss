@@ -8,6 +8,7 @@ Handles:
 - Image extraction from description HTML
 - Consistent output structure across all sources
 - Time-based filtering
+- Browser User-Agent for sites that block bots (e.g., archpaper.com)
 
 Usage:
     from operators.rss_fetcher import RSSFetcher
@@ -36,12 +37,22 @@ Output Structure (consistent for all sources):
 
 import re
 import feedparser
+import urllib.request
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 from urllib.parse import urljoin
 from html import unescape
 
 from config.sources import SOURCES, get_source_config
+
+
+# Browser-like User-Agent to avoid 403 blocks
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 class RSSFetcher:
@@ -65,6 +76,36 @@ class RSSFetcher:
         # Patterns to extract image dimensions
         self._width_pattern = re.compile(r'width=["\']?(\d+)', re.IGNORECASE)
         self._height_pattern = re.compile(r'height=["\']?(\d+)', re.IGNORECASE)
+
+        # Default timeout for HTTP requests
+        self._request_timeout = 20
+
+    def _fetch_feed_content(self, url: str, use_browser_ua: bool = False) -> bytes:
+        """
+        Fetch RSS feed content with optional browser User-Agent.
+
+        Args:
+            url: RSS feed URL
+            use_browser_ua: Whether to use browser User-Agent
+
+        Returns:
+            Feed content as bytes
+
+        Raises:
+            urllib.error.URLError: If fetch fails
+        """
+        headers = {
+            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+
+        if use_browser_ua:
+            headers['User-Agent'] = BROWSER_USER_AGENT
+
+        request = urllib.request.Request(url, headers=headers)
+
+        with urllib.request.urlopen(request, timeout=self._request_timeout) as response:
+            return response.read()
 
     def fetch_source(
         self, 
@@ -95,14 +136,44 @@ class RSSFetcher:
             return []
 
         source_name = config.get("name", source_id.capitalize())
+        requires_browser_ua = config.get("requires_user_agent", False)
 
         print(f"[RSS] Fetching {source_name}: {rss_url}")
 
         try:
-            feed = feedparser.parse(rss_url)
+            # Fetch and parse the feed
+            # Some sites (like archpaper.com) block default feedparser User-Agent
+            # We try with browser UA first for marked sources, or as fallback
 
-            if feed.bozo:
-                print(f"[WARN] Feed warning for {source_name}: {feed.bozo_exception}")
+            feed = None
+
+            if requires_browser_ua:
+                # Use browser UA for sources that require it
+                try:
+                    content = self._fetch_feed_content(rss_url, use_browser_ua=True)
+                    feed = feedparser.parse(content)
+                    print(f"   [OK] Fetched with browser User-Agent")
+                except urllib.error.URLError as e:
+                    print(f"   [WARN] Browser UA fetch failed: {e}")
+
+            if feed is None or not feed.entries:
+                # Try standard feedparser (works for most sources)
+                feed = feedparser.parse(rss_url)
+
+                # If standard fails, try with browser UA as fallback
+                if (feed.bozo or not feed.entries) and not requires_browser_ua:
+                    try:
+                        content = self._fetch_feed_content(rss_url, use_browser_ua=True)
+                        feed_with_ua = feedparser.parse(content)
+                        if feed_with_ua.entries:
+                            feed = feed_with_ua
+                            print(f"   [OK] Recovered with browser User-Agent")
+                    except urllib.error.URLError:
+                        pass  # Keep original feed result
+
+            if feed.bozo and not feed.entries:
+                print(f"[WARN] Feed error for {source_name}: {feed.bozo_exception}")
+                return []
 
             if not feed.entries:
                 print(f"[WARN] No entries found for {source_name}")
@@ -456,7 +527,7 @@ if __name__ == "__main__":
     fetcher = RSSFetcher()
 
     # Test individual sources
-    test_sources = ["archdaily", "dezeen"]
+    test_sources = ["archdaily", "dezeen", "archpaper"]
 
     for source_id in test_sources:
         print(f"\n{'='*40}")
@@ -476,7 +547,7 @@ if __name__ == "__main__":
 
     all_articles = fetcher.fetch_all_sources(
         hours=24, 
-        source_ids=["archdaily", "dezeen"],
+        source_ids=["archdaily", "dezeen", "archpaper"],
         max_per_source=2
     )
 

@@ -7,6 +7,9 @@ Organization:
     - Tier 1: Global Primary Sources (high volume, daily monitoring)
     - Tier 2: Regional Sources (organized by geography)
 
+Note: Sources marked with requires_user_agent=True need browser User-Agent
+      to avoid 403 blocks. Some may only work from certain IP ranges (Railway vs Replit).
+
 Usage:
     from config.sources import get_source_name, get_source_config, SOURCES
     from config.sources import get_sources_by_tier, get_sources_by_region
@@ -17,7 +20,7 @@ from typing import Optional
 
 
 # =============================================================================
-# Source Configuration - 20 Working Sources
+# Source Configuration - 19 Sources (18 confirmed + 1 Railway-only)
 # =============================================================================
 
 SOURCES = {
@@ -57,19 +60,22 @@ SOURCES = {
         "region": "uk",
         "scrape_timeout": 20000,
     },
+    # Archpaper: Works in browser, returns 403 from Replit IPs
+    # Keep it - might work on Railway which has different IPs
+    "archpaper": {
+        "name": "The Architect's Newspaper",
+        "domains": ["archpaper.com", "www.archpaper.com"],
+        "rss_url": "https://www.archpaper.com/feed",
+        "tier": 1,
+        "region": "north_america",
+        "scrape_timeout": 20000,
+        "requires_user_agent": True,  # Blocks bot requests
+    },
 
     # =========================================================================
     # TIER 2 - North America
     # =========================================================================
 
-    "metropolis": {
-        "name": "Metropolis",
-        "domains": ["metropolismag.com", "www.metropolismag.com"],
-        "rss_url": "https://metropolismag.com/feed/",
-        "tier": 2,
-        "region": "north_america",
-        "scrape_timeout": 20000,
-    },
     "canadian_architect": {
         "name": "Canadian Architect",
         "domains": ["canadianarchitect.com", "www.canadianarchitect.com"],
@@ -119,23 +125,6 @@ SOURCES = {
         "category": "critique",
         "scrape_timeout": 20000,
     },
-    "landezine": {
-        "name": "Landezine",
-        "domains": ["landezine.com", "www.landezine.com"],
-        "rss_url": "http://www.landezine.com/feed",
-        "tier": 2,
-        "region": "europe",
-        "category": "landscape",
-        "scrape_timeout": 20000,
-    },
-    "aasarchitecture": {
-        "name": "A As Architecture",
-        "domains": ["aasarchitecture.com", "www.aasarchitecture.com"],
-        "rss_url": "https://aasarchitecture.com/feed/",
-        "tier": 2,
-        "region": "europe",
-        "scrape_timeout": 20000,
-    },
 
     # =========================================================================
     # TIER 2 - Asia-Pacific
@@ -173,6 +162,15 @@ SOURCES = {
         "region": "asia_pacific",
         "scrape_timeout": 20000,
     },
+    "spoon_tamago": {
+        "name": "Spoon & Tamago",
+        "domains": ["spoon-tamago.com", "www.spoon-tamago.com"],
+        "rss_url": "https://spoon-tamago.com/feed/",
+        "tier": 2,
+        "region": "asia_pacific",
+        "category": "japan_design",
+        "scrape_timeout": 20000,
+    },
     "indesignlive_sg": {
         "name": "Indesign Live Singapore",
         "domains": ["indesignlive.sg", "www.indesignlive.sg"],
@@ -204,7 +202,7 @@ SOURCES = {
     },
 
     # =========================================================================
-    # TIER 2 - Middle East
+    # TIER 2 - Middle East / Computational
     # =========================================================================
 
     "parametric_architecture": {
@@ -217,6 +215,30 @@ SOURCES = {
         "scrape_timeout": 20000,
     },
 }
+
+
+# =============================================================================
+# REMOVED SOURCES (for reference)
+# =============================================================================
+# The following sources were removed due to feed issues:
+#
+# HTTP 403 (IP blocked - may work on Railway):
+#   - places_journal: https://placesjournal.org/feed/
+#   - landezine: http://www.landezine.com/feed
+#   - aasarchitecture: https://aasarchitecture.com/feed/
+#
+# HTTP 404 (Feed discontinued or URL changed):
+#   - architectural_record: https://www.architecturalrecord.com/rss/headlines
+#   - metropolis: https://metropolismag.com/feed/
+#   - metalocus: https://www.metalocus.es/en/feed
+#   - archiru: https://archi.ru/rss
+#   - archidatum: https://www.archidatum.com/feed/
+#   - planetizen: https://www.planetizen.com/rss/news
+#
+# Malformed XML (genuinely broken feeds):
+#   - domus: https://www.domusweb.it/en.rss.xml
+#   - next_city: https://nextcity.org/rss
+# =============================================================================
 
 
 # =============================================================================
