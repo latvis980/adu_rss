@@ -575,7 +575,7 @@ def parse_args():
         "--sources",
         nargs="+",
         default=None,
-        help=f"Sources to fetch (default: all {len(DEFAULT_SOURCES)} sources)"
+        help=f"Sources to fetch (default: all {len(get_all_source_ids())} sources)"
     )
 
     parser.add_argument(
