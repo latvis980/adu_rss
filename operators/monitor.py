@@ -147,7 +147,12 @@ def summarize_article(article: dict, llm, prompt_template) -> dict:
     Returns:
         Article dict with added ai_summary and tags
     """
+    from datetime import datetime
+
     print(f"🤖 Summarizing: {article['title'][:50]}...")
+
+    # Get current date for temporal context
+    current_date = datetime.now().strftime("%B %d, %Y")  # e.g., "January 15, 2026"
 
     # Create chain and invoke
     chain = prompt_template | llm
@@ -155,7 +160,8 @@ def summarize_article(article: dict, llm, prompt_template) -> dict:
     response = chain.invoke({
         "title": article["title"],
         "description": article["description"],
-        "url": article["link"]
+        "url": article["link"],
+        "current_date": current_date
     })
 
     # Parse response
