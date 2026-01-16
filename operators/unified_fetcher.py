@@ -46,7 +46,7 @@ class UnifiedFetcher:
         # Track which sources use which method
         self.custom_sources = set(list_custom_scrapers())
         
-        print(f"[UnifiedFetcher] Initialized")
+        print("[UnifiedFetcher] Initialized")
         print(f"   Custom scrapers: {len(self.custom_sources)}")
     
     async def fetch_source(
@@ -245,7 +245,7 @@ async def test_unified_fetcher():
     
     # Show available sources
     sources = fetcher.list_all_sources()
-    print(f"\n📊 Available sources:")
+    print("\n📊 Available sources:")
     print(f"   RSS sources: {len(sources['rss'])}")
     print(f"   Custom scrapers: {len(sources['custom'])}")
     print(f"   Total unique: {sources['total']}")
