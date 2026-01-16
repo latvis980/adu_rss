@@ -172,6 +172,14 @@ SOURCES = {
         "category": "russia",
         "scrape_timeout": 20000,
     },
+    "landezine": {
+        "name": "Landezine",
+        "domains": ["landezine.com", "www.landezine.com"],
+        "tier": 2,
+        "region": "europe",
+        "category": "landscape",
+        "scrape_timeout": 30000,
+    },
 
     # =========================================================================
     # TIER 2 - Asia-Pacific

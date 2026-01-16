@@ -59,8 +59,13 @@ from config.sources import (
     get_all_source_ids,
 )
 
+# TEMP: Testing custom scraper
+from operators.custom_scrapers.landezine import LandezineScraper
+
 # Default configuration
 DEFAULT_HOURS_LOOKBACK = 24
+
+
 
 # Source lists are now dynamically pulled from config/sources.py
 # No need to maintain duplicate lists here!
@@ -370,14 +375,18 @@ async def run_pipeline(
         else:
             source_ids = get_all_source_ids()
 
-    # Filter to only sources with RSS feeds
-    valid_sources = []
-    for sid in source_ids:
-        config = get_source_config(sid)
-        if config and config.get("rss_url"):
-            valid_sources.append(sid)
-        else:
-            print(f"⚠️ Skipping {sid}: no RSS URL configured")
+    # Filter to only sources with RSS feeds - temporarily disable 
+    # valid_sources = []
+    # for sid in source_ids:
+    #    config = get_source_config(sid)
+    #    if config and config.get("rss_url"):
+    #       valid_sources.append(sid)
+    #    else:
+    #        print(f"⚠️ Skipping {sid}: no RSS URL configured")
+
+    # TEMP: Force landezine for custom scraper test
+    valid_sources = ["landezine"]
+    print("⚠️ TEMP: Testing custom scraper - forcing landezine only")
 
     if not valid_sources:
         print("❌ No valid sources to process")
@@ -405,15 +414,33 @@ async def run_pipeline(
             r2 = None
 
         # =================================================================
-        # Step 1: Fetch RSS Feeds
+        # Step 1: Fetch RSS Feeds - temporarily disabled
         # =================================================================
-        print("\n📡 Step 1: Fetching RSS feeds...")
+        # print("\n📡 Step 1: Fetching RSS feeds...")
 
-        fetcher = RSSFetcher()
-        articles = fetcher.fetch_all_sources(
-            hours=hours,
-            source_ids=valid_sources
-        )
+        # fetcher = RSSFetcher()
+        # articles = fetcher.fetch_all_sources(
+        #     hours=hours,
+        #     source_ids=valid_sources
+        # )
+
+        # =================================================================
+        # Step 1: Fetch Articles (TEMP: Custom Scraper)
+        # =================================================================
+        print("\n📡 Step 1: TEMP - Testing Landezine custom scraper...")
+
+        scraper_test = LandezineScraper()
+        try:
+            articles = await scraper_test.fetch_articles(hours=hours)
+        finally:
+            await scraper_test.close()
+
+        # Ensure correct format
+        for article in articles:
+            if "source_id" not in article:
+                article["source_id"] = "landezine"
+            if "source_name" not in article:
+                article["source_name"] = "Landezine"
 
         if not articles:
             print("📭 No new articles found. Exiting.")
