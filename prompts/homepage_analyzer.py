@@ -17,6 +17,7 @@ Your task is to examine a screenshot of a news/blog homepage and extract the vis
 Guidelines:
 - Look for text that appears to be article headlines (larger font, prominent placement)
 - Ignore navigation menus, footer links, sidebar content, ads
+- Ignore section labels — they can sometimes appear above the actual headline. The clue is that they are usually smaller and often appear on the page several times. 
 - Focus on the main content area where articles are listed
 - Each headline should be distinct (not repeated navigation items)
 - Return ONLY the headlines, one per line
