@@ -460,15 +460,15 @@ async def run_pipeline(
         custom_sources = [s for s in valid_sources if is_custom_scraper(s)]
 
         # Fetch from RSS sources
-        if rss_sources:
-            print(f"\n📰 Fetching {len(rss_sources)} RSS sources...")
-            fetcher = RSSFetcher()
-            rss_articles = fetcher.fetch_all_sources(
-                hours=hours,
-                source_ids=rss_sources
-            )
-            all_articles.extend(rss_articles)
-            print(f"   ✅ RSS: {len(rss_articles)} articles")
+#        if rss_sources:
+#            print(f"\n📰 Fetching {len(rss_sources)} RSS sources...")
+#            fetcher = RSSFetcher()
+#            rss_articles = fetcher.fetch_all_sources(
+#                hours=hours,
+#                source_ids=rss_sources
+#            )
+#            all_articles.extend(rss_articles)
+#            print(f"   ✅ RSS: {len(rss_articles)} articles")
 
         # Fetch from custom scrapers
         if custom_sources:
