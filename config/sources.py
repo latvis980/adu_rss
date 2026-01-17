@@ -319,22 +319,14 @@ SOURCES = {
 # The following sources were removed due to feed issues:
 #
 # HTTP 403 (IP blocked - may work on Railway):
-#   - MOVE TO SCRAPING landezine: http://www.landezine.com/feed (EUROPE)
+#   - AGGRESSIVE BLOCKING, TRIED EVERYTHING landezine: http://www.landezine.com/feed (EUROPE) 
 #   - ADD WITH SCRAPING (instead of spoon tamago) https://www.japan-architects.com/en
-#   - ADD WITH SCRAPING https://www.indesignlive.com/ (AUSTRALIA)
 #   - PUT ON HOLD - IMAGES BROKEN aasarchitecture: https://aasarchitecture.com/feed/
 #
-# HTTP 404 (Feed discontinued or URL changed):
-#   - architectural_record: DIFFERENT FEED https://www.architecturalrecord.com/rss/topic/305
 #   - MOVE TO SCRAPING metropolis: https://metropolismag.com/projects/
 #   - MOVE TO SCRAPING metalocus: https://www.metalocus.es/en (EUROPE)
-#   - MOVE TO SCRAPING archidatum: https://www.archidatum.com/f (AFRICA)
+#   - MOVE TO SCRAPING archidatum: https://www.archidatum.com/ (AFRICA)
 #   - MOVE TO SCRAPING domus: https://www.domusweb.it/ (EUROPE)
-
-
-#   - CORRECTED FEED, DEFINITELY HAS CLOUDFLARE next_city: https://nextcity.org/feeds/daily (US, URBANISM)
-#   - CORRECTED FEED URL places_journal: http://feeds.feedburner.com/PlacesJournal
-#   - CORRECTED FEED URL planetizen: https://www.planetizen.com/frontpage/feed (USA, URBANISM)
 
 # =============================================================================
 

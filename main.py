@@ -383,19 +383,23 @@ async def run_pipeline(
         else:
             source_ids = get_all_source_ids()
 
-    # Filter to only sources with RSS feeds - temporarily disable 
-    # valid_sources = []
-    # for sid in source_ids:
-    #    config = get_source_config(sid)
-    #    if config and config.get("rss_url"):
-    #       valid_sources.append(sid)
-    #    else:
-    #        print(f"⚠️ Skipping {sid}: no RSS URL configured")
+    # Validate sources exist in config
+    valid_sources = []
+    for sid in source_ids:
+        config = get_source_config(sid)
+        if config:
+            valid_sources.append(sid)
+        else:
+            print(f"⚠️ Skipping {sid}: not found in sources config")
 
-    # TEMP: Force for custom scraper test
-    valid_sources = ["archiposition", "prorus", "bauwelt", "gooood"]
-    print("⚠️ TEMP: Testing custom scrapers - forcing identity")
+    # Filter to only custom scrapers (RSS works, no need to run it every time)
+    custom_only = [s for s in valid_sources if is_custom_scraper(s)]
 
+    if custom_only:
+        valid_sources = custom_only
+        print(f"ℹ️  Running only custom scrapers: {', '.join(custom_only)}")
+    else:
+        print("⚠️ No custom scrapers found in selected sources")
 
     if not valid_sources:
         print("❌ No valid sources to process")
