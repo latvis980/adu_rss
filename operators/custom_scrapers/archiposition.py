@@ -361,38 +361,30 @@ Do not include any explanation."""
 
                         # Validate URL - must be article page, not category
                         if '/items/' not in url:
-                            print(f"      ⚠️  Skipping non-article URL (category/tag page)")
+                            print("      ⚠️  Skipping non-article URL (category/tag page)")
                             skipped_no_link += 1
                             continue
 
-                        # Navigate to article page
+                        # ============================================
+                        # Navigate to article to get date ONLY
+                        # ============================================
                         await page.goto(url, timeout=self.timeout)
                         await page.wait_for_timeout(1000)
 
-                        # Extract metadata from article page
-                        article_metadata = await page.evaluate("""
+                        # Extract only the date (hero image will be handled by scraper.py)
+                        date_text = await page.evaluate("""
                             () => {
-                                // Get publication date
                                 const dateEl = document.querySelector(
                                     'time[datetime], .date, [class*="date"], [class*="time"]'
                                 );
-                                const dateText = dateEl ? 
+                                return dateEl ? 
                                     (dateEl.getAttribute('datetime') || dateEl.textContent.trim()) : 
-                                    '';
-
-                                // Get og:image
-                                const ogImage = document.querySelector('meta[property="og:image"]');
-                                const heroImageUrl = ogImage ? ogImage.content : null;
-
-                                return {
-                                    date_text: dateText,
-                                    hero_image_url: heroImageUrl
-                                };
+                                    null;
                             }
                         """)
 
                         # Parse date
-                        published = self._parse_date(article_metadata['date_text'])
+                        published = self._parse_date(date_text) if date_text else None
 
                         # DATE FILTERING: Only process articles from today/yesterday
                         if published:
@@ -407,32 +399,16 @@ Do not include any explanation."""
 
                             print(f"      ✅ Fresh article ({days_old} day(s) old)")
                         else:
-                            print(f"      ⚠️ No date found - including anyway")
+                            print("      ⚠️ No date found - including anyway")
 
-                        # Build hero image
-                        hero_image = None
-                        if article_metadata.get('hero_image_url'):
-                            hero_image = {
-                                "url": article_metadata['hero_image_url'],
-                                "width": None,
-                                "height": None,
-                                "source": "scraper"
-                            }
-                        elif homepage_data.get('image_url'):
-                            hero_image = {
-                                "url": homepage_data['image_url'],
-                                "width": None,
-                                "height": None,
-                                "source": "scraper"
-                            }
-
-                        # Create article dict
-                        article = self._create_article_dict(
+                        # ============================================
+                        # Create MINIMAL article dict
+                        # Hero image and content will be extracted by scraper.py
+                        # ============================================
+                        article = self._create_minimal_article_dict(
                             title=homepage_data['title'],
                             link=url,
-                            description=homepage_data.get('description', ''),
-                            published=published,
-                            hero_image=hero_image
+                            published=published
                         )
 
                         if self._validate_article(article):

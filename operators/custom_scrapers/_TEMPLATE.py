@@ -156,136 +156,83 @@ class TemplateSourceScraper(BaseCustomScraper):
                 print(f"[{self.source_id}] Processing {len(new_urls)} new articles")
                 
                 # ============================================================
-                # STEP 3: CLICK into each NEW article (if needed for dates)
+                # STEP 3: EXTRACT DATES from new articles (minimal scraping)
                 # ============================================================
-                
+
                 new_articles = []
-                
+
                 for i, url in enumerate(new_urls, 1):
                     homepage_data = next((a for a in homepage_articles if a['link'] == url), None)
-                    
+
                     if not homepage_data:
                         continue
-                    
+
                     print(f"   [{i}/{len(new_urls)}] {homepage_data['title'][:50]}...")
-                    
+
                     try:
-                        # OPTION A: If dates are on homepage
-                        # Just use homepage data without clicking into article
-                        
-                        # article = self._create_article_dict(
-                        #     title=homepage_data['title'],
-                        #     link=url,
-                        #     description=homepage_data['description'],
-                        #     published=None,  # or parse from homepage
-                        #     hero_image=None
-                        # )
-                        
-                        # OPTION B: If dates ONLY on article pages (like Landezine)
-                        # Navigate to article to get publication date
-                        
+                        # Navigate to article ONLY to get publication date
                         await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout)
-                        await page.wait_for_timeout(1500)
-                        
-                        # CUSTOMIZE: Extract metadata from article page
-                        article_metadata = await page.evaluate("""
+                        await page.wait_for_timeout(1000)
+
+                        # CUSTOMIZE: Extract ONLY the publication date
+                        date_metadata = await page.evaluate("""
                             () => {
-                                // Look for publication date
-                                const datePatterns = [
-                                    /(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i,
-                                    /(\d{4})-(\d{2})-(\d{2})/
-                                ];
-                                
-                                let dateText = '';
-                                const bodyText = document.body.textContent;
-                                
-                                for (const pattern of datePatterns) {
-                                    const match = bodyText.match(pattern);
-                                    if (match) {
-                                        dateText = match[0];
-                                        break;
-                                    }
+                                // Try multiple date selectors
+                                const dateEl = document.querySelector(
+                                    'time[datetime], ' +
+                                    '.date, ' +
+                                    '[class*="date"], ' +
+                                    '[class*="time"], ' +
+                                    'meta[property="article:published_time"]'
+                                );
+
+                                if (dateEl) {
+                                    // Try datetime attribute first
+                                    const datetime = dateEl.getAttribute('datetime');
+                                    if (datetime) return datetime;
+
+                                    // Try meta content
+                                    const content = dateEl.getAttribute('content');
+                                    if (content) return content;
+
+                                    // Fall back to text content
+                                    return dateEl.textContent.trim();
                                 }
-                                
-                                // Check meta tags
-                                const articlePublished = document.querySelector('meta[property="article:published_time"]');
-                                if (articlePublished && !dateText) {
-                                    dateText = articlePublished.content;
-                                }
-                                
-                                // Get og:image
-                                const ogImage = document.querySelector('meta[property="og:image"]');
-                                const heroImageUrl = ogImage ? ogImage.content : null;
-                                
-                                return {
-                                    date_text: dateText,
-                                    hero_image_url: heroImageUrl
-                                };
+
+                                return null;
                             }
                         """)
-                        
+
                         # Parse date
-                        published = self._parse_date(article_metadata['date_text'])
-                        
-                        # Build hero image
-                        hero_image = None
-                        if article_metadata.get('hero_image_url'):
-                            hero_image = {
-                                "url": article_metadata['hero_image_url'],
-                                "width": None,
-                                "height": None,
-                                "source": "scraper"
-                            }
-                        elif homepage_data.get('image_url'):
-                            hero_image = {
-                                "url": homepage_data['image_url'],
-                                "width": None,
-                                "height": None,
-                                "source": "scraper"
-                            }
-                        
-                        # Create article dict
-                        article = self._create_article_dict(
+                        published = self._parse_date(date_metadata) if date_metadata else None
+
+                        # Create MINIMAL article dict
+                        # Hero image and content will be extracted by scraper.py
+                        article = self._create_minimal_article_dict(
                             title=homepage_data['title'],
                             link=url,
-                            description=homepage_data['description'],
-                            published=published,
-                            hero_image=hero_image
+                            published=published
                         )
-                        
+
                         if self._validate_article(article):
                             new_articles.append(article)
-                        
+                            print(f"      ✅ Date: {published or 'unknown'}")
+
                         # Small delay between pages
                         await asyncio.sleep(0.5)
-                        
+
                     except Exception as e:
                         print(f"      ⚠️ Error processing article: {e}")
                         continue
-                
+
                 # ============================================================
                 # STEP 4: MARK all new URLs as SEEN in database
                 # ============================================================
-                
+
                 await self.tracker.mark_as_seen(self.source_id, new_urls)
-                
-                print(f"[{self.source_id}] Successfully extracted {len(new_articles)} new articles")
+
+                print(f"[{self.source_id}] Returning {len(new_articles)} new articles for pipeline processing")
                 return new_articles
-
-            finally:
-                await page.close()
-
-        except Exception as e:
-            print(f"[{self.source_id}] Error fetching articles: {e}")
-            return []
-
-    async def close(self):
-        """Close browser and tracker connections."""
-        await super().close()
-        
-        if self.tracker:
-            await self.tracker.close()
-            self.tracker = None
 
 
 # =========================================================================

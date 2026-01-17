@@ -13,7 +13,7 @@ Visual Scraping Strategy:
 4. On first run: Store all headlines in database as "seen"
 5. On subsequent runs: Only process NEW headlines (not in database)
 6. Find headline text in HTML coupled with link using AI
-7. Click link to get publication date and metadata
+7. Click link to get publication date ONLY (hero image extracted by scraper.py)
 
 Usage:
     scraper = ArchidatumScraper()
@@ -97,15 +97,15 @@ class ArchidatumScraper(BaseCustomScraper):
             }
         """)
         if not html_context: return None
-        
+
         context = f"Looking for: '{headline}'\n\n"
         for item in html_context[:15]:
             context += f"\n[{item['index']}] {item['link_text']}\n    {item['href']}\n"
-        
+
         prompt = f"{context}\n\nWhich index matches '{headline}'? Respond with ONLY the number or 'NONE'."
         ai_resp = await asyncio.to_thread(self.vision_model.invoke, [HumanMessage(content=prompt)])
         resp_text = str(ai_resp.content if hasattr(ai_resp, 'content') else ai_resp).strip().upper()
-        
+
         if resp_text == "NONE": return None
         import re
         match = re.search(r'\d+', resp_text)
@@ -126,69 +126,98 @@ class ArchidatumScraper(BaseCustomScraper):
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             })
-            
+
             try:
                 await page.goto(self.base_url, timeout=self.timeout, wait_until="networkidle")
                 await page.wait_for_timeout(2000)
-                
+
                 screenshot_path = f"/tmp/{self.source_id}_homepage.png"
                 await page.screenshot(path=screenshot_path, full_page=False)
-                
+
                 current_headlines = await self._analyze_homepage_screenshot(screenshot_path)
                 if not current_headlines: return []
-                
+
                 seen_headlines = await self.tracker.get_stored_headlines(self.source_id)
                 new_headlines = [h for h in current_headlines if h not in seen_headlines][:10]
-                
+
                 if not new_headlines: return []
-                
+
                 new_articles = []
                 for i, headline in enumerate(new_headlines, 1):
                     try:
+                        # ============================================
+                        # STEP 1: Find headline and link with AI
+                        # ============================================
                         data = await self._find_headline_in_html_with_ai(page, headline)
-                        if not data or not data.get('link'): continue
-                        
-                        await page.goto(data['link'], timeout=self.timeout)
+                        if not data or not data.get('link'): 
+                            continue
+
+                        url = data['link']
+                        print(f"   [{i}/{len(new_headlines)}] {headline[:50]}...")
+                        print(f"      🔗 Found link: {url}")
+
+                        # ============================================
+                        # STEP 2: Navigate to article to get date ONLY
+                        # ============================================
+                        await page.goto(url, timeout=self.timeout)
                         await page.wait_for_timeout(1000)
-                        
-                        meta = await page.evaluate("""
+
+                        # Extract only the date (hero image will be handled by scraper.py)
+                        date_text = await page.evaluate("""
                             () => {
-                                const date = document.querySelector('time[datetime], .date');
-                                const og = document.querySelector('meta[property="og:image"]');
-                                return {date_text: date ? (date.getAttribute('datetime') || date.textContent) : '',
-                                        hero_image_url: og ? og.content : null};
+                                const dateEl = document.querySelector(
+                                    'time[datetime], .date, [class*="date"]'
+                                );
+                                return dateEl ? 
+                                    (dateEl.getAttribute('datetime') || dateEl.textContent.trim()) : 
+                                    null;
                             }
                         """)
-                        
-                        published = self._parse_date(meta['date_text'])
+
+                        published = self._parse_date(date_text) if date_text else None
+
+                        # Check article age
                         if published:
                             days = (datetime.now(timezone.utc) - datetime.fromisoformat(published.replace('Z', '+00:00'))).days
-                            if days > self.MAX_ARTICLE_AGE_DAYS: continue
-                        
-                        hero = None
-                        if meta.get('hero_image_url'):
-                            hero = {"url": meta['hero_image_url'], "width": None, "height": None, "source": "scraper"}
-                        
-                        article = self._create_article_dict(
-                            title=data['title'], link=data['link'],
-                            description=data.get('description', ''),
-                            published=published, hero_image=hero
+                            if days > self.MAX_ARTICLE_AGE_DAYS:
+                                print(f"      ⏭️ Skipping: too old ({days} days)")
+                                continue
+
+                        # ============================================
+                        # STEP 3: Create MINIMAL article dict
+                        # Hero image and content will be extracted by scraper.py
+                        # ============================================
+                        article = self._create_minimal_article_dict(
+                            title=data['title'],
+                            link=url,
+                            published=published
                         )
-                        
+
                         if self._validate_article(article):
                             new_articles.append(article)
-                            await self.tracker.update_headline_url(self.source_id, headline, data['link'])
-                        
+                            await self.tracker.update_headline_url(self.source_id, headline, url)
+                            print(f"      ✅ Date: {published or 'unknown'}")
+
+                        # Small delay between pages
                         await asyncio.sleep(0.5)
+
+                        # Go back to homepage for next headline
                         await page.goto(self.base_url, timeout=self.timeout)
                         await page.wait_for_timeout(1000)
+
                     except Exception as e:
-                        print(f"[{self.source_id}] Error on {headline[:30]}: {e}")
-                
+                        print(f"      ⚠️ Error processing {headline[:30]}: {e}")
+                        continue
+
+                # Store all current headlines as seen
                 await self.tracker.store_headlines(self.source_id, current_headlines)
+
+                print(f"[{self.source_id}] Returning {len(new_articles)} articles for pipeline processing")
                 return new_articles
+
             finally:
                 await page.close()
+
         except Exception as e:
             print(f"[{self.source_id}] Error: {e}")
             return []

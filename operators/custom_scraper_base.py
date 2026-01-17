@@ -406,40 +406,41 @@ class BaseCustomScraper(ABC):
 
         return True
 
-    def _create_article_dict(
+    # In operators/custom_scraper_base.py
+
+    def _create_minimal_article_dict(
         self,
         title: str,
         link: str,
-        description: str = "",
-        published: Optional[str] = None,
-        hero_image: Optional[dict] = None
+        published: Optional[str] = None
     ) -> dict:
         """
-        Create a standardized article dict.
+        Create a MINIMAL article dict for custom scrapers.
+
+        These articles will be processed through main scraper.py pipeline
+        for consistent hero image and content extraction.
 
         Args:
-            title: Article title
+            title: Article title (from homepage)
             link: Article URL
-            description: Article description/excerpt
-            published: Publication date (ISO format)
-            hero_image: Hero image dict
+            published: Publication date (ISO format) - extracted from article page
 
         Returns:
-            Standardized article dict
+            Minimal article dict (will be enhanced by scraper.py)
         """
-        article = {
+        return {
             "title": self._clean_text(title),
             "link": self._resolve_url(link),
-            "description": self._clean_text(description),
+            "guid": self._resolve_url(link),
             "published": published,
-            "guid": self._resolve_url(link),  # Use URL as GUID
             "source_id": self.source_id,
             "source_name": self.source_name,
             "custom_scraped": True,
-            "hero_image": hero_image,
+            # These will be filled by scraper.py:
+            "description": "",
+            "hero_image": None,
+            "full_content": ""
         }
-
-        return article
 
     # =========================================================================
     # Testing
