@@ -73,8 +73,6 @@ from operators.custom_scrapers.gooood import GoooodScraper
 # Default configuration
 DEFAULT_HOURS_LOOKBACK = 24
 
-
-
 # Source lists are now dynamically pulled from config/sources.py
 # No need to maintain duplicate lists here!
 
@@ -381,7 +379,7 @@ async def run_pipeline(
         elif tier == 2:
             source_ids = get_source_ids_by_tier(2)
         else:
-            source_ids = get_all_source_ids()
+            source_ids = get_all_active_source_ids()  # ← This one includes custom scrapers!
 
     # Validate sources exist in config
     valid_sources = []
