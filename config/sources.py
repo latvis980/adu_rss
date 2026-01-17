@@ -263,6 +263,7 @@ SOURCES = {
     "identity": {
         "id": "identity",
         "name": "Identity Magazine",
+        "domains": ["identity.ae", "www.identity.ae"],  # Add this line!
         "tier": 2,
         "region": "middle_east",
         "custom_scraper": True,  # Uses visual scraper

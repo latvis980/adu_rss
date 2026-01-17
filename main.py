@@ -471,6 +471,20 @@ async def run_pipeline(
 
         articles = all_articles
 
+        if not articles:
+            print("📭 No new articles found. Exiting.")
+            return
+
+        print(f"   ✅ Found {len(articles)} articles total")
+
+        # Show breakdown by source
+        by_source = {}
+        for article in articles:
+            sid = article.get("source_id", "unknown")
+            by_source[sid] = by_source.get(sid, 0) + 1
+        for sid, count in sorted(by_source.items()):
+            print(f"      - {sid}: {count}")
+
         # =================================================================
         # Step 2: Scrape Full Content (optional)
         # =================================================================
