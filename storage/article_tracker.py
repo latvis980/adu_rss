@@ -1,470 +1,406 @@
 # storage/article_tracker.py
 """
-Article Tracker - PostgreSQL-based tracking for custom scrapers
-Tracks which articles have been seen to detect new content.
+Article Tracker - PostgreSQL Database for Custom Scrapers
+
+Tracks seen article URLs and headlines to prevent reprocessing.
+Supports visual scraping workflow where headlines are extracted via AI.
 
 Database Schema:
-    seen_articles:
-        - id (serial primary key)
-        - source_id (varchar) - e.g., 'landezine'
-        - article_url (varchar, unique) - full article URL
-        - article_guid (varchar) - URL or hash
-        - first_seen (timestamp) - when first discovered
-        - last_checked (timestamp) - last verification
+    - articles table: stores seen URLs and headlines per source
+    - Indexed by source_id and url for fast lookups
 
 Usage:
-    from storage.article_tracker import ArticleTracker
-
     tracker = ArticleTracker()
     await tracker.connect()
 
-    # Check if article is new
-    is_new = await tracker.is_new_article("landezine", "https://landezine.com/article-123")
+    # Visual scraping workflow
+    await tracker.store_headlines(source_id, headlines_list)
+    stored_headlines = await tracker.get_stored_headlines(source_id)
 
-    # Mark articles as seen
-    await tracker.mark_as_seen("landezine", ["url1", "url2", "url3"])
-
-    # Get new articles from a list
-    new_urls = await tracker.filter_new_articles("landezine", all_urls)
+    # URL tracking workflow  
+    new_urls = await tracker.filter_new_articles(source_id, url_list)
+    await tracker.mark_as_seen(source_id, url_list)
 """
 
 import os
-import asyncio
-from datetime import datetime, timezone
-from typing import Optional, List
 import asyncpg
-from urllib.parse import urlparse
+from typing import Optional, List
+from datetime import datetime
 
 
 class ArticleTracker:
-    """
-    Tracks seen articles for custom scrapers using PostgreSQL.
+    """PostgreSQL-based article tracking for custom scrapers."""
 
-    Prevents re-processing articles when publication dates aren't available
-    on listing pages.
-    """
-
-    def __init__(self, database_url: Optional[str] = None):
+    def __init__(self, connection_url: Optional[str] = None):
         """
         Initialize article tracker.
 
         Args:
-            database_url: PostgreSQL connection URL (defaults to DATABASE_URL env var)
+            connection_url: PostgreSQL connection URL (defaults to DATABASE_URL env var)
         """
-        self.database_url = database_url or os.getenv("DATABASE_URL")
+        self.connection_url = connection_url or os.getenv("DATABASE_URL")
 
-        if not self.database_url:
-            raise ValueError("DATABASE_URL not set in environment")
+        if not self.connection_url:
+            raise ValueError("DATABASE_URL environment variable not set")
 
         self.pool: Optional[asyncpg.Pool] = None
-        self._initialized = False
-
-    # =========================================================================
-    # Connection Management
-    # =========================================================================
 
     async def connect(self):
-        """Create connection pool and initialize database."""
+        """Connect to PostgreSQL and initialize schema."""
         if self.pool:
             return
 
-        try:
-            # Create connection pool
-            self.pool = await asyncpg.create_pool(
-                self.database_url,
-                min_size=1,
-                max_size=10,
-                command_timeout=60
-            )
+        # Create connection pool
+        self.pool = await asyncpg.create_pool(
+            self.connection_url,
+            min_size=1,
+            max_size=5,
+            command_timeout=60
+        )
 
-            print("✅ Article tracker connected to PostgreSQL")
+        # Initialize schema
+        await self._init_schema()
 
-            # Initialize schema
-            await self._initialize_schema()
+        print("✅ Article tracker connected to PostgreSQL")
 
-        except Exception as e:
-            print(f"❌ Failed to connect to database: {e}")
-            raise
-
-    async def close(self):
-        """Close connection pool."""
-        if self.pool:
-            await self.pool.close()
-            self.pool = None
-            print("✅ Article tracker disconnected")
-
-    async def _initialize_schema(self):
-        """Create tables if they don't exist."""
-        if self._initialized or not self.pool:
-            return
+    async def _init_schema(self):
+        """Create articles table if it doesn't exist."""
+        if not self.pool:
+            raise RuntimeError("Not connected to database")
 
         async with self.pool.acquire() as conn:
-            # Create seen_articles table
             await conn.execute("""
-                CREATE TABLE IF NOT EXISTS seen_articles (
+                CREATE TABLE IF NOT EXISTS articles (
                     id SERIAL PRIMARY KEY,
                     source_id VARCHAR(100) NOT NULL,
-                    article_url VARCHAR(1000) NOT NULL,
-                    article_guid VARCHAR(1000) NOT NULL,
-                    first_seen TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    last_checked TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    UNIQUE(source_id, article_url)
+                    url TEXT NOT NULL,
+                    headline TEXT,
+                    first_seen TIMESTAMP DEFAULT NOW(),
+                    last_checked TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(source_id, url)
                 )
             """)
 
-            # Create index for faster lookups
+            # Create index for fast lookups
             await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_source_url 
-                ON seen_articles(source_id, article_url)
+                CREATE INDEX IF NOT EXISTS idx_articles_source_url 
+                ON articles(source_id, url)
             """)
 
+            # Create index for headline searches
             await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_source_seen 
-                ON seen_articles(source_id, first_seen DESC)
+                CREATE INDEX IF NOT EXISTS idx_articles_source_headline 
+                ON articles(source_id, headline)
             """)
 
-            print("✅ Article tracker schema initialized")
-            self._initialized = True
+        print("✅ Article tracker schema initialized")
 
     # =========================================================================
-    # Article Tracking
+    # Visual Scraping - Headline Storage
     # =========================================================================
 
-    async def is_new_article(self, source_id: str, url: str) -> bool:
+    async def store_headlines(self, source_id: str, headlines: List[str]) -> int:
         """
-        Check if an article URL is new (not seen before).
+        Store headlines from first visual analysis run.
+
+        This is used on first run to mark all visible headlines as "seen"
+        so subsequent runs only process new headlines.
 
         Args:
-            source_id: Source identifier (e.g., 'landezine')
-            url: Article URL
+            source_id: Source identifier
+            headlines: List of headline strings
 
         Returns:
-            True if article is new, False if already seen
+            Number of headlines stored
         """
         if not self.pool:
-            await self.connect()
+            raise RuntimeError("Not connected to database")
 
-        if not self.pool:
-            raise RuntimeError("Failed to connect to database")
+        stored = 0
 
         async with self.pool.acquire() as conn:
-            result = await conn.fetchval(
-                """
-                SELECT COUNT(*) FROM seen_articles 
-                WHERE source_id = $1 AND article_url = $2
-                """,
-                source_id, url
-            )
+            for headline in headlines:
+                if not headline or not headline.strip():
+                    continue
 
-            return result == 0
+                try:
+                    # Use headline as URL placeholder for now
+                    # Will be updated when we find the actual URL
+                    await conn.execute("""
+                        INSERT INTO articles (source_id, url, headline)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (source_id, url) DO NOTHING
+                    """, source_id, f"headline:{headline}", headline.strip())
 
-    async def mark_as_seen(
-        self, 
-        source_id: str, 
-        urls: List[str],
-        guids: Optional[List[str]] = None
-    ) -> int:
+                    stored += 1
+
+                except Exception as e:
+                    print(f"   ⚠️ Error storing headline: {e}")
+                    continue
+
+        print(f"[{source_id}] Stored {stored} headlines in database")
+        return stored
+
+    async def get_stored_headlines(self, source_id: str) -> List[str]:
         """
-        Mark articles as seen.
+        Get all stored headlines for a source.
+
+        Args:
+            source_id: Source identifier
+
+        Returns:
+            List of headline strings
+        """
+        if not self.pool:
+            raise RuntimeError("Not connected to database")
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT headline FROM articles
+                WHERE source_id = $1 AND headline IS NOT NULL
+                ORDER BY first_seen DESC
+            """, source_id)
+
+            return [row['headline'] for row in rows if row['headline']]
+
+    async def find_new_headlines(self, source_id: str, current_headlines: List[str]) -> List[str]:
+        """
+        Find headlines that haven't been seen before.
+
+        Uses fuzzy matching to handle slight variations in headline text.
+
+        Args:
+            source_id: Source identifier
+            current_headlines: List of headlines currently on the page
+
+        Returns:
+            List of headlines not in database
+        """
+        if not self.pool:
+            raise RuntimeError("Not connected to database")
+
+        stored_headlines = await self.get_stored_headlines(source_id)
+
+        # Simple exact match for now
+        # TODO: Could add fuzzy matching later if needed
+        stored_set = set(h.strip().lower() for h in stored_headlines)
+
+        new_headlines = [
+            h for h in current_headlines
+            if h.strip().lower() not in stored_set
+        ]
+
+        return new_headlines
+
+    async def update_headline_url(self, source_id: str, headline: str, url: str) -> bool:
+        """
+        Update a headline entry with its actual URL.
+
+        Called after finding the link for a headline in HTML.
+
+        Args:
+            source_id: Source identifier
+            headline: Article headline
+            url: Actual article URL
+
+        Returns:
+            True if updated successfully
+        """
+        if not self.pool:
+            raise RuntimeError("Not connected to database")
+
+        async with self.pool.acquire() as conn:
+            try:
+                # Check if URL already exists
+                existing = await conn.fetchval("""
+                    SELECT id FROM articles
+                    WHERE source_id = $1 AND url = $2
+                """, source_id, url)
+
+                if existing:
+                    # URL already tracked, just update last_checked
+                    await conn.execute("""
+                        UPDATE articles
+                        SET last_checked = NOW()
+                        WHERE source_id = $1 AND url = $2
+                    """, source_id, url)
+                    return True
+
+                # Update the placeholder entry
+                result = await conn.execute("""
+                    UPDATE articles
+                    SET url = $1, last_checked = NOW()
+                    WHERE source_id = $2 AND headline = $3 AND url LIKE 'headline:%'
+                """, url, source_id, headline)
+
+                # If no placeholder found, insert new entry
+                if result == "UPDATE 0":
+                    await conn.execute("""
+                        INSERT INTO articles (source_id, url, headline)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (source_id, url) DO UPDATE
+                        SET headline = EXCLUDED.headline, last_checked = NOW()
+                    """, source_id, url, headline)
+
+                return True
+
+            except Exception as e:
+                print(f"   ⚠️ Error updating headline URL: {e}")
+                return False
+
+    # =========================================================================
+    # URL Tracking (Traditional Method)
+    # =========================================================================
+
+    async def filter_new_articles(self, source_id: str, urls: List[str]) -> List[str]:
+        """
+        Filter list of URLs to only those not seen before.
 
         Args:
             source_id: Source identifier
             urls: List of article URLs
-            guids: Optional list of GUIDs (defaults to URLs)
 
         Returns:
-            Number of new articles added
+            List of URLs not in database
         """
         if not self.pool:
-            await self.connect()
-
-        if not self.pool:
-            raise RuntimeError("Failed to connect to database")
-
-        if not urls:
-            return 0
-
-        # Use URLs as GUIDs if not provided
-        if guids is None:
-            guids = urls
-
-        if len(urls) != len(guids):
-            raise ValueError("urls and guids must have same length")
-
-        now = datetime.now(timezone.utc)
-        added = 0
-
-        async with self.pool.acquire() as conn:
-            for url, guid in zip(urls, guids):
-                try:
-                    # Insert or update
-                    result = await conn.execute(
-                        """
-                        INSERT INTO seen_articles 
-                            (source_id, article_url, article_guid, first_seen, last_checked)
-                        VALUES ($1, $2, $3, $4, $4)
-                        ON CONFLICT (source_id, article_url) 
-                        DO UPDATE SET last_checked = $4
-                        """,
-                        source_id, url, guid, now
-                    )
-
-                    # Check if this was an insert (not update)
-                    if result == "INSERT 0 1":
-                        added += 1
-
-                except Exception as e:
-                    print(f"⚠️ Error marking {url} as seen: {e}")
-
-        if added > 0:
-            print(f"📝 Marked {added} new articles as seen for {source_id}")
-
-        return added
-
-    async def filter_new_articles(
-        self, 
-        source_id: str, 
-        urls: List[str]
-    ) -> List[str]:
-        """
-        Filter a list of URLs to only new (unseen) articles.
-
-        Args:
-            source_id: Source identifier
-            urls: List of article URLs to check
-
-        Returns:
-            List of URLs that haven't been seen before
-        """
-        if not self.pool:
-            await self.connect()
-
-        if not self.pool:
-            raise RuntimeError("Failed to connect to database")
+            raise RuntimeError("Not connected to database")
 
         if not urls:
             return []
 
         async with self.pool.acquire() as conn:
-            # Get all seen URLs for this source
-            seen_urls = await conn.fetch(
-                """
-                SELECT article_url FROM seen_articles 
-                WHERE source_id = $1 AND article_url = ANY($2)
-                """,
-                source_id, urls
-            )
+            # Get all existing URLs for this source
+            rows = await conn.fetch("""
+                SELECT url FROM articles
+                WHERE source_id = $1 AND url = ANY($2)
+            """, source_id, urls)
 
-            seen_set = {row['article_url'] for row in seen_urls}
+            seen_urls = set(row['url'] for row in rows)
 
-            # Return only URLs not in seen set
-            new_urls = [url for url in urls if url not in seen_set]
-
-            if new_urls:
-                print(f"🆕 Found {len(new_urls)} new articles (out of {len(urls)} total)")
+            # Return URLs not in database
+            new_urls = [url for url in urls if url not in seen_urls]
 
             return new_urls
 
+    async def mark_as_seen(self, source_id: str, urls: List[str]) -> int:
+        """
+        Mark URLs as seen in the database.
+
+        Args:
+            source_id: Source identifier
+            urls: List of article URLs
+
+        Returns:
+            Number of URLs marked as seen
+        """
+        if not self.pool:
+            raise RuntimeError("Not connected to database")
+
+        if not urls:
+            return 0
+
+        marked = 0
+
+        async with self.pool.acquire() as conn:
+            for url in urls:
+                try:
+                    await conn.execute("""
+                        INSERT INTO articles (source_id, url)
+                        VALUES ($1, $2)
+                        ON CONFLICT (source_id, url) DO UPDATE
+                        SET last_checked = NOW()
+                    """, source_id, url)
+
+                    marked += 1
+
+                except Exception as e:
+                    print(f"   ⚠️ Error marking URL as seen: {e}")
+                    continue
+
+        return marked
+
     # =========================================================================
-    # Statistics & Maintenance
+    # Statistics
     # =========================================================================
 
     async def get_stats(self, source_id: Optional[str] = None) -> dict:
         """
-        Get tracking statistics.
+        Get statistics about tracked articles.
 
         Args:
             source_id: Optional source to filter by
 
         Returns:
-            Dict with stats (total_articles, sources, oldest, newest)
+            Dict with statistics
         """
         if not self.pool:
-            await self.connect()
-
-        if not self.pool:
-            raise RuntimeError("Failed to connect to database")
+            raise RuntimeError("Not connected to database")
 
         async with self.pool.acquire() as conn:
             if source_id:
-                total = await conn.fetchval(
-                    "SELECT COUNT(*) FROM seen_articles WHERE source_id = $1",
-                    source_id
-                )
-                oldest = await conn.fetchval(
-                    "SELECT MIN(first_seen) FROM seen_articles WHERE source_id = $1",
-                    source_id
-                )
-                newest = await conn.fetchval(
-                    "SELECT MAX(first_seen) FROM seen_articles WHERE source_id = $1",
-                    source_id
-                )
-                sources = [source_id]
+                count = await conn.fetchval("""
+                    SELECT COUNT(*) FROM articles WHERE source_id = $1
+                """, source_id)
+
+                oldest = await conn.fetchval("""
+                    SELECT first_seen FROM articles
+                    WHERE source_id = $1
+                    ORDER BY first_seen ASC LIMIT 1
+                """, source_id)
+
+                newest = await conn.fetchval("""
+                    SELECT first_seen FROM articles
+                    WHERE source_id = $1
+                    ORDER BY first_seen DESC LIMIT 1
+                """, source_id)
             else:
-                total = await conn.fetchval("SELECT COUNT(*) FROM seen_articles")
-                oldest = await conn.fetchval("SELECT MIN(first_seen) FROM seen_articles")
-                newest = await conn.fetchval("SELECT MAX(first_seen) FROM seen_articles")
+                count = await conn.fetchval("SELECT COUNT(*) FROM articles")
+                oldest = await conn.fetchval("""
+                    SELECT first_seen FROM articles
+                    ORDER BY first_seen ASC LIMIT 1
+                """)
+                newest = await conn.fetchval("""
+                    SELECT first_seen FROM articles
+                    ORDER BY first_seen DESC LIMIT 1
+                """)
 
-                # Get all sources
-                source_rows = await conn.fetch(
-                    "SELECT DISTINCT source_id FROM seen_articles"
-                )
-                sources = [row['source_id'] for row in source_rows]
+            return {
+                "total_articles": count or 0,
+                "oldest_seen": oldest.isoformat() if oldest else None,
+                "newest_seen": newest.isoformat() if newest else None,
+            }
 
-        return {
-            "total_articles": total,
-            "sources": sources,
-            "oldest_seen": oldest.isoformat() if oldest else None,
-            "newest_seen": newest.isoformat() if newest else None,
-        }
-
-    async def cleanup_old_articles(
-        self, 
-        source_id: str, 
-        days: int = 90
-    ) -> int:
+    async def clear_source(self, source_id: str) -> int:
         """
-        Remove old article records to prevent database bloat.
+        Clear all tracked articles for a source.
 
         Args:
             source_id: Source identifier
-            days: Keep articles seen in last N days
 
         Returns:
-            Number of records deleted
+            Number of articles deleted
         """
         if not self.pool:
-            await self.connect()
-
-        if not self.pool:
-            raise RuntimeError("Failed to connect to database")
+            raise RuntimeError("Not connected to database")
 
         async with self.pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                DELETE FROM seen_articles 
-                WHERE source_id = $1 
-                AND first_seen < NOW() - INTERVAL '%s days'
-                """,
-                source_id, days
-            )
+            result = await conn.execute("""
+                DELETE FROM articles WHERE source_id = $1
+            """, source_id)
 
-            # Parse result like "DELETE 42"
-            deleted = int(result.split()[-1]) if result else 0
-
-            if deleted > 0:
-                print(f"🗑️ Cleaned up {deleted} old articles for {source_id}")
-
+            # Extract count from result
+            deleted = int(result.split()[-1])
+            print(f"[{source_id}] Cleared {deleted} tracked articles")
             return deleted
 
-    async def get_recent_articles(
-        self, 
-        source_id: str, 
-        limit: int = 20
-    ) -> List[dict]:
-        """
-        Get recently seen articles for a source.
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
 
-        Args:
-            source_id: Source identifier
-            limit: Maximum number to return
-
-        Returns:
-            List of article dicts with url, guid, first_seen
-        """
-        if not self.pool:
-            await self.connect()
-
-        if not self.pool:
-            raise RuntimeError("Failed to connect to database")
-
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT article_url, article_guid, first_seen, last_checked
-                FROM seen_articles 
-                WHERE source_id = $1 
-                ORDER BY first_seen DESC 
-                LIMIT $2
-                """,
-                source_id, limit
-            )
-
-            return [
-                {
-                    "url": row['article_url'],
-                    "guid": row['article_guid'],
-                    "first_seen": row['first_seen'].isoformat(),
-                    "last_checked": row['last_checked'].isoformat(),
-                }
-                for row in rows
-            ]
-
-
-# =============================================================================
-# Convenience Functions
-# =============================================================================
-
-async def test_tracker():
-    """Test the article tracker."""
-    print("=" * 60)
-    print("Testing Article Tracker")
-    print("=" * 60)
-
-    tracker = ArticleTracker()
-
-    try:
-        await tracker.connect()
-
-        # Test data
-        test_source = "test_source"
-        test_urls = [
-            "https://example.com/article-1",
-            "https://example.com/article-2",
-            "https://example.com/article-3",
-        ]
-
-        # Mark articles as seen
-        print("\n1. Marking test articles as seen...")
-        added = await tracker.mark_as_seen(test_source, test_urls)
-        print(f"   Added {added} new articles")
-
-        # Check if articles are new
-        print("\n2. Checking if articles are new...")
-        for url in test_urls:
-            is_new = await tracker.is_new_article(test_source, url)
-            print(f"   {url}: {'NEW' if is_new else 'SEEN'}")
-
-        # Filter new articles
-        print("\n3. Filtering new articles...")
-        all_urls = test_urls + ["https://example.com/article-4"]
-        new_urls = await tracker.filter_new_articles(test_source, all_urls)
-        print(f"   New URLs: {new_urls}")
-
-        # Get stats
-        print("\n4. Getting stats...")
-        stats = await tracker.get_stats(test_source)
-        print(f"   Total articles: {stats['total_articles']}")
-        print(f"   Sources: {stats['sources']}")
-
-        # Get recent articles
-        print("\n5. Getting recent articles...")
-        recent = await tracker.get_recent_articles(test_source, limit=5)
-        for article in recent:
-            print(f"   - {article['url']} (seen: {article['first_seen']})")
-
-        print("\n" + "=" * 60)
-        print("✅ Test complete!")
-        print("=" * 60)
-
-    except Exception as e:
-        print(f"\n❌ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-    finally:
-        await tracker.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(test_tracker())
+    async def close(self):
+        """Close database connection pool."""
+        if self.pool:
+            await self.pool.close()
+            self.pool = None
+            print("✅ Article tracker disconnected")

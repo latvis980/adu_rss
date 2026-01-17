@@ -1,23 +1,21 @@
 # operators/custom_scrapers/landezine.py
 """
-Landezine Custom Scraper
+Landezine Custom Scraper - Visual AI Approach
 Scrapes landscape architecture news from Landezine.com
 
-Site Strategy:
-- Homepage doesn't show publication dates
-- Solution: Track seen article URLs in PostgreSQL database
-- On first run: Mark all visible articles as seen
-- On subsequent runs: Only process articles with new URLs
-- Click into new articles to get publication date from article page
+Visual Scraping Strategy:
+1. Take screenshot of homepage
+2. Use GPT-4o vision to extract article headlines
+3. On first run: Store all headlines in database as "seen"
+4. On subsequent runs: Only process NEW headlines (not in database)
+5. Find headline text in HTML coupled with link
+6. Click link to get publication date and metadata
+7. Continue with standard scraping logic
 
-Database Tracking:
-- Uses ArticleTracker to store seen URLs
-- Prevents re-processing old articles
-- Enables incremental monitoring
+This approach is resilient to HTML structure changes since we use
+visual analysis to identify articles rather than hardcoded selectors.
 
 Usage:
-    from operators.custom_scrapers.landezine import LandezineScraper
-
     scraper = LandezineScraper()
     articles = await scraper.fetch_articles()
     await scraper.close()
@@ -25,29 +23,37 @@ Usage:
 
 import re
 import asyncio
-from typing import Optional, List
+import base64
+from typing import Optional, List, Any, cast
 from datetime import datetime, timezone
+
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
 
 from operators.custom_scraper_base import BaseCustomScraper, custom_scraper_registry
 from storage.article_tracker import ArticleTracker
+from prompts.homepage_analyzer import HOMEPAGE_ANALYZER_PROMPT_TEMPLATE, parse_headlines
 
 
 class LandezineScraper(BaseCustomScraper):
     """
-    Custom scraper for Landezine.com
-    Landscape architecture projects and articles.
-
-    Uses URL tracking to detect new articles since dates aren't on homepage.
+    Visual AI-powered custom scraper for Landezine.com
+    Uses GPT-4o vision to identify articles on homepage.
     """
 
     source_id = "landezine"
     source_name = "Landezine"
     base_url = "https://landezine.com"
 
+    # Configuration: Maximum age of articles to process (in days)
+    # Articles older than this will be skipped even if new to the scraper
+    MAX_ARTICLE_AGE_DAYS = 2  # Today + yesterday
+
     def __init__(self):
-        """Initialize scraper with article tracker."""
+        """Initialize scraper with article tracker and vision model."""
         super().__init__()
         self.tracker: Optional[ArticleTracker] = None
+        self.vision_model: Optional[ChatOpenAI] = None
 
     async def _ensure_tracker(self):
         """Ensure article tracker is connected."""
@@ -55,25 +61,165 @@ class LandezineScraper(BaseCustomScraper):
             self.tracker = ArticleTracker()
             await self.tracker.connect()
 
-    async def fetch_articles(self, hours: int = 24) -> list[dict]:
-        """
-        Fetch new articles from Landezine homepage.
+    def _ensure_vision_model(self):
+        """Ensure vision model is initialized."""
+        if not self.vision_model:
+            import os
+            api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not set")
 
-        Strategy:
-        1. Get all article URLs from homepage
-        2. Filter to only URLs not seen before (using database)
-        3. Click into each new article to get publication date
-        4. Mark new URLs as seen in database
+            # Cast to str for type checker (we know it's not None after the check above)
+            api_key_str = cast(str, api_key)
+
+            self.vision_model = ChatOpenAI(
+                model="gpt-4o-mini",
+                api_key=api_key_str,
+                temperature=0.1  # Low temperature for consistent extraction
+            )
+            print(f"[{self.source_id}] Vision model initialized")
+
+    async def _analyze_homepage_screenshot(self, screenshot_path: str) -> List[str]:
+        """
+        Analyze homepage screenshot with GPT-4o vision to extract headlines.
 
         Args:
-            hours: Not used (kept for compatibility with base class)
+            screenshot_path: Path to screenshot PNG
 
         Returns:
-            List of article dicts (only new articles)
+            List of article headlines
         """
-        max_new = 10  # Process up to 10 new articles per run
+        self._ensure_vision_model()
 
-        print(f"[{self.source_id}] Fetching new articles...")
+        print(f"[{self.source_id}] 🔍 Analyzing screenshot with AI vision...")
+
+        # Read and encode screenshot
+        with open(screenshot_path, 'rb') as f:
+            image_data = base64.b64encode(f.read()).decode('utf-8')
+
+        # Create vision message
+        message = HumanMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": HOMEPAGE_ANALYZER_PROMPT_TEMPLATE.format()
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{image_data}"
+                    }
+                }
+            ]
+        )
+
+        # Get response
+        if not self.vision_model:
+            raise RuntimeError("Vision model not initialized")
+
+        response = await asyncio.to_thread(
+            self.vision_model.invoke,
+            [message]
+        )
+
+        # Parse headlines - ensure response.content is a string
+        response_text = response.content if hasattr(response, 'content') else str(response)
+        if not isinstance(response_text, str):
+            response_text = str(response_text)
+
+        headlines = parse_headlines(response_text)
+
+        print(f"[{self.source_id}] ✅ Extracted {len(headlines)} headlines from screenshot")
+        return headlines
+
+    async def _find_headline_in_html(self, page, headline: str) -> Optional[dict]:
+        """
+        Find a headline in the page HTML and extract its link.
+
+        Uses fuzzy text matching to find the headline even if formatting differs.
+
+        Args:
+            page: Playwright page object
+            headline: Headline text to search for
+
+        Returns:
+            Dict with title, link, description, image or None
+        """
+        # Clean headline for searching
+        search_text = headline.strip().lower()
+
+        result = await page.evaluate("""
+            (searchText) => {
+                // Find all links on the page
+                const allLinks = Array.from(document.querySelectorAll('a[href]'));
+
+                for (const link of allLinks) {
+                    const linkText = link.textContent.trim().toLowerCase();
+
+                    // Check if this link contains the headline text
+                    if (linkText.includes(searchText) || searchText.includes(linkText)) {
+                        // Extract associated data
+                        const href = link.href;
+
+                        // Try to find parent article/post container
+                        let container = link.closest('article, .post, [class*="post"], [class*="item"]') || link;
+
+                        // Get description
+                        const descEl = container.querySelector('p, .excerpt, .description');
+                        const description = descEl ? descEl.textContent.trim() : '';
+
+                        // Get image
+                        const imgEl = container.querySelector('img');
+                        const imageUrl = imgEl ? imgEl.src : null;
+
+                        // Get exact title from link
+                        const title = link.textContent.trim();
+
+                        return {
+                            title: title,
+                            link: href,
+                            description: description,
+                            image_url: imageUrl
+                        };
+                    }
+                }
+
+                return null;
+            }
+        """, search_text)
+
+        return result
+
+    async def fetch_articles(self, hours: int = 24) -> List[dict]:
+        """
+        Fetch new articles using visual AI analysis.
+
+        Args:
+            hours: Not used for visual scraping (kept for base class compatibility)
+                   Visual scraping uses headline comparison instead of time-based filtering
+
+        Workflow:
+        1. Screenshot homepage
+        2. Extract headlines with GPT-4o vision
+        3. Compare with stored headlines to find NEW ones (database filtering)
+        4. For each new headline:
+           - Find it in HTML and get the link
+           - Click link to get publication date
+           - Filter by date: only keep articles from today/yesterday (max 2 days old)
+           - Create article dict
+        5. Store all current headlines in database (for next run)
+
+        Date Filtering:
+        - Articles older than MAX_ARTICLE_AGE_DAYS are skipped (handles archive content)
+        - Articles without dates are included (better to include than miss)
+        - Uses article publication date, not homepage appearance date
+
+        Returns:
+            List of article dicts (only new articles from today/yesterday)
+        """
+        # Maximum new articles to process per run
+        max_new = 10
+        print(f"[{self.source_id}] 📸 Starting visual AI scraping...")
 
         await self._ensure_tracker()
 
@@ -82,124 +228,86 @@ class LandezineScraper(BaseCustomScraper):
 
             try:
                 # ============================================================
-                # Step 1: Get all article URLs from homepage
+                # Step 1: Take Screenshot of Homepage
                 # ============================================================
 
                 await page.goto(self.base_url, wait_until="domcontentloaded", timeout=self.timeout)
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(2000)  # Let page fully render
 
-                # Extract all article URLs and basic info
-                homepage_articles = await page.evaluate(r"""
-                    () => {
-                        const articles = [];
+                # Save screenshot
+                import os
+                import tempfile
+                screenshot_path = os.path.join(tempfile.gettempdir(), f"{self.source_id}_homepage.png")
 
-                        // Look for article elements
-                        const selectors = [
-                            'article',
-                            '.post',
-                            '[class*="article"]',
-                            '.entry'
-                        ];
+                await page.screenshot(path=screenshot_path, full_page=True)
+                print(f"[{self.source_id}] 📸 Screenshot saved: {screenshot_path}")
 
-                        let articleElements = [];
-                        for (const selector of selectors) {
-                            const elements = document.querySelectorAll(selector);
-                            if (elements.length > 0) {
-                                articleElements = Array.from(elements);
-                                break;
-                            }
-                        }
+                # ============================================================
+                # Step 2: Extract Headlines with AI Vision
+                # ============================================================
 
-                        articleElements.forEach(article => {
-                            // Extract title
-                            const titleEl = article.querySelector('h1, h2, h3, .title, [class*="title"]');
-                            const title = titleEl ? titleEl.textContent.trim() : '';
+                current_headlines = await self._analyze_homepage_screenshot(screenshot_path)
 
-                            // Extract link
-                            const linkEl = article.querySelector('a[href]');
-                            const link = linkEl ? linkEl.href : '';
-
-                            // Extract description/excerpt
-                            const excerptEl = article.querySelector('p, .excerpt, .description, [class*="excerpt"]');
-                            const description = excerptEl ? excerptEl.textContent.trim() : '';
-
-                            // Extract image
-                            const imgEl = article.querySelector('img');
-                            const imageUrl = imgEl ? imgEl.src : null;
-                            const imageWidth = imgEl ? imgEl.naturalWidth || imgEl.width : null;
-                            const imageHeight = imgEl ? imgEl.naturalHeight || imgEl.height : null;
-
-                            // Only include if we have essential data
-                            if (title && link) {
-                                articles.push({
-                                    title: title,
-                                    link: link,
-                                    description: description,
-                                    image_url: imageUrl,
-                                    image_width: imageWidth,
-                                    image_height: imageHeight,
-                                });
-                            }
-                        });
-
-                        return articles;
-                    }
-                """)
-
-                print(f"[{self.source_id}] Found {len(homepage_articles)} articles on homepage")
-
-                if not homepage_articles:
-                    print(f"[{self.source_id}] No articles found on homepage")
+                if not current_headlines:
+                    print(f"[{self.source_id}] No headlines extracted from screenshot")
                     return []
 
                 # ============================================================
-                # Step 2: Filter to only NEW article URLs
+                # Step 3: Find NEW Headlines (not in database)
                 # ============================================================
 
-                all_urls = [a['link'] for a in homepage_articles]
-
-                # Ensure tracker is initialized
                 if not self.tracker:
-                    await self._ensure_tracker()
+                    raise RuntimeError("Article tracker not initialized")
 
-                new_urls = await self.tracker.filter_new_articles(self.source_id, all_urls)
+                new_headlines = await self.tracker.find_new_headlines(
+                    self.source_id,
+                    current_headlines
+                )
 
-                if not new_urls:
-                    print(f"[{self.source_id}] No new articles found (all URLs seen before)")
+                if not new_headlines:
+                    print(f"[{self.source_id}] No new headlines (all previously seen)")
                     return []
 
                 # Limit to max_new
-                if len(new_urls) > max_new:
-                    print(f"[{self.source_id}] Limiting to {max_new} newest articles (found {len(new_urls)})")
-                    new_urls = new_urls[:max_new]
+                if len(new_headlines) > max_new:
+                    print(f"[{self.source_id}] Limiting to {max_new} articles (found {len(new_headlines)} new)")
+                    new_headlines = new_headlines[:max_new]
 
-                print(f"[{self.source_id}] Processing {len(new_urls)} new articles")
+                print(f"[{self.source_id}] Processing {len(new_headlines)} new articles")
 
                 # ============================================================
-                # Step 3: Click into each NEW article to get publication date
+                # Step 4: Find Each Headline in HTML and Extract Link
                 # ============================================================
 
                 new_articles = []
+                skipped_old = 0  # Track articles skipped due to date
+                skipped_no_link = 0  # Track articles with no link found
 
-                for i, url in enumerate(new_urls, 1):
-                    # Find the homepage article data
-                    homepage_data = next((a for a in homepage_articles if a['link'] == url), None)
-
-                    if not homepage_data:
-                        continue
-
-                    print(f"   [{i}/{len(new_urls)}] {homepage_data['title'][:50]}...")
+                for i, headline in enumerate(new_headlines, 1):
+                    print(f"   [{i}/{len(new_headlines)}] {headline[:50]}...")
 
                     try:
-                        # Navigate to article page
+                        # Find headline in HTML
+                        homepage_data = await self._find_headline_in_html(page, headline)
+
+                        if not homepage_data:
+                            print(f"      ⚠️ Could not find link for headline")
+                            skipped_no_link += 1
+                            continue
+
+                        url = homepage_data['link']
+
+                        # ============================================================
+                        # Step 5: Click Into Article to Get Publication Date
+                        # ============================================================
+
                         await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout)
                         await page.wait_for_timeout(1500)
 
-                        # Extract publication date and other metadata from article page
-                        # Use raw string for regex patterns to avoid escape sequence warnings
+                        # Extract publication date and metadata
                         article_metadata = await page.evaluate(r"""
                             () => {
-                                // Look for publication date - using proper regex escaping
+                                // Look for publication date
                                 const datePatterns = [
                                     /(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i,
                                     /(\d{4})-(\d{2})-(\d{2})/
@@ -216,13 +324,13 @@ class LandezineScraper(BaseCustomScraper):
                                     }
                                 }
 
-                                // Also check meta tags for date
+                                // Check meta tags
                                 const articlePublished = document.querySelector('meta[property="article:published_time"]');
                                 if (articlePublished && !dateText) {
                                     dateText = articlePublished.content;
                                 }
 
-                                // Get og:image (hero image)
+                                // Get og:image
                                 const ogImage = document.querySelector('meta[property="og:image"]');
                                 const heroImageUrl = ogImage ? ogImage.content : null;
 
@@ -233,10 +341,32 @@ class LandezineScraper(BaseCustomScraper):
                             }
                         """)
 
-                        # Parse the date
+                        # Parse date
                         published = self._parse_date(article_metadata['date_text'])
 
-                        # Build hero image dict (prefer og:image from article page)
+                        # ============================================================
+                        # DATE FILTERING: Only process articles from today/yesterday
+                        # ============================================================
+
+                        if published:
+                            article_date = datetime.fromisoformat(published.replace('Z', '+00:00'))
+                            current_date = datetime.now(timezone.utc)
+
+                            # Calculate days difference
+                            days_old = (current_date - article_date).days
+
+                            # Skip if older than configured max age
+                            if days_old > self.MAX_ARTICLE_AGE_DAYS:
+                                print(f"      ⏭️  Skipping old article ({days_old} days old)")
+                                skipped_old += 1
+                                continue
+
+                            print(f"      ✅ Fresh article ({days_old} day(s) old)")
+                        else:
+                            # If no date found, include it (better to include than miss)
+                            print(f"      ⚠️  No date found - including anyway")
+
+                        # Build hero image
                         hero_image = None
                         if article_metadata.get('hero_image_url'):
                             hero_image = {
@@ -248,8 +378,8 @@ class LandezineScraper(BaseCustomScraper):
                         elif homepage_data.get('image_url'):
                             hero_image = {
                                 "url": homepage_data['image_url'],
-                                "width": homepage_data.get('image_width'),
-                                "height": homepage_data.get('image_height'),
+                                "width": None,
+                                "height": None,
                                 "source": "scraper"
                             }
 
@@ -262,32 +392,60 @@ class LandezineScraper(BaseCustomScraper):
                             hero_image=hero_image
                         )
 
-                        # Validate and add
                         if self._validate_article(article):
                             new_articles.append(article)
 
-                        # Small delay between article page loads
+                            # Update database with URL
+                            if not self.tracker:
+                                raise RuntimeError("Article tracker not initialized")
+
+                            await self.tracker.update_headline_url(
+                                self.source_id,
+                                headline,
+                                url
+                            )
+
+                        # Small delay
                         await asyncio.sleep(0.5)
 
+                        # Go back to homepage for next headline
+                        await page.goto(self.base_url, timeout=self.timeout)
+                        await page.wait_for_timeout(1000)
+
                     except Exception as e:
-                        print(f"      ⚠️ Error processing article: {e}")
+                        print(f"      ⚠️ Error processing headline: {e}")
                         continue
 
                 # ============================================================
-                # Step 4: Mark all new URLs as seen (even if some failed)
+                # Step 6: Store ALL Current Headlines (for next run)
                 # ============================================================
 
-                if self.tracker:
-                    await self.tracker.mark_as_seen(self.source_id, new_urls)
+                # Store all headlines we saw (both new and old)
+                if not self.tracker:
+                    raise RuntimeError("Article tracker not initialized")
 
-                print(f"[{self.source_id}] Successfully extracted {len(new_articles)} new articles")
+                await self.tracker.store_headlines(self.source_id, current_headlines)
+
+                # ============================================================
+                # Final Summary
+                # ============================================================
+
+                print(f"\n[{self.source_id}] 📊 Processing Summary:")
+                print(f"   Headlines extracted: {len(current_headlines)}")
+                print(f"   New headlines: {len(new_headlines)}")
+                print(f"   Skipped (too old): {skipped_old}")
+                print(f"   Skipped (no link): {skipped_no_link}")
+                print(f"   ✅ Successfully scraped: {len(new_articles)}")
+
                 return new_articles
 
             finally:
                 await page.close()
 
         except Exception as e:
-            print(f"[{self.source_id}] Error fetching articles: {e}")
+            print(f"[{self.source_id}] Error in visual scraping: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     async def close(self):
@@ -308,9 +466,9 @@ custom_scraper_registry.register(LandezineScraper)
 # =============================================================================
 
 async def test_landezine_scraper():
-    """Test the Landezine scraper with URL tracking."""
+    """Test the visual AI scraper."""
     print("=" * 60)
-    print("Testing Landezine Custom Scraper (with URL tracking)")
+    print("Testing Landezine Visual AI Scraper")
     print("=" * 60)
 
     scraper = LandezineScraper()
@@ -328,18 +486,21 @@ async def test_landezine_scraper():
         print("\n2. Checking tracker stats...")
         await scraper._ensure_tracker()
 
-        if scraper.tracker:
-            stats = await scraper.tracker.get_stats(source_id="landezine")
+        if not scraper.tracker:
+            print("   ⚠️ Tracker not initialized")
+            return
 
-            print(f"   Total articles in database: {stats['total_articles']}")
-            if stats['oldest_seen']:
-                print(f"   Oldest: {stats['oldest_seen']}")
-            if stats['newest_seen']:
-                print(f"   Newest: {stats['newest_seen']}")
+        stats = await scraper.tracker.get_stats(source_id="landezine")
 
-        # Fetch new articles (limit to 5 for testing)
-        print("\n3. Fetching new articles (max 5)...")
-        articles = await scraper.fetch_articles(hours=24)
+        print(f"   Total articles in database: {stats['total_articles']}")
+        if stats['oldest_seen']:
+            print(f"   Oldest: {stats['oldest_seen']}")
+        if stats['newest_seen']:
+            print(f"   Newest: {stats['newest_seen']}")
+
+        # Fetch new articles
+        print("\n3. Running visual AI scraping (max 5 new articles)...")
+        articles = await scraper.fetch_articles(hours=24)  # hours parameter ignored, uses max_new=10 internally
 
         print(f"\n   ✅ Found {len(articles)} NEW articles")
 
@@ -357,10 +518,13 @@ async def test_landezine_scraper():
             print("\n4. No new articles (all previously seen)")
 
         # Show updated stats
-        if scraper.tracker:
-            print("\n5. Updated tracker stats...")
-            stats = await scraper.tracker.get_stats(source_id="landezine")
-            print(f"   Total articles in database: {stats['total_articles']}")
+        print("\n5. Updated tracker stats...")
+        if not scraper.tracker:
+            print("   ⚠️ Tracker not initialized")
+            return
+
+        stats = await scraper.tracker.get_stats(source_id="landezine")
+        print(f"   Total articles in database: {stats['total_articles']}")
 
         print("\n" + "=" * 60)
         print("Test complete!")
