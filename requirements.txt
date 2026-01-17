@@ -19,3 +19,5 @@ playwright==1.56.0
 langsmith>=0.1.0
 
 cloudscraper>=1.2.71
+
+asyncpg>=0.29.0
