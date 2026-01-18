@@ -210,72 +210,55 @@ class BaseCustomScraper(ABC):
     # Common Helper Methods
     # =========================================================================
 
-    def _parse_date(self, date_string: str) -> Optional[str]:
+    def _parse_date_with_ai(self, article_text: str) -> str | None:
         """
-        Parse various date formats into ISO format.
-
-        Handles:
-        - "January 11, 2026"
-        - "11 January 2026"
-        - "2026-01-16"
-        - "16/01/2026"
+        Use AI to extract publication date from article text.
+        Works with any date format and language.
 
         Args:
-            date_string: Raw date string
+            article_text: Article text containing publication date
 
         Returns:
-            ISO format datetime string or None
+            ISO format date string (YYYY-MM-DD) or None
         """
-        if not date_string:
+        from datetime import datetime
+        from prompts.date_extractor import DATE_EXTRACTOR_PROMPT_TEMPLATE, parse_date_response
+        from langchain_core.messages import HumanMessage
+
+        if not article_text or len(article_text.strip()) < 10:
             return None
 
-        date_string = date_string.strip()
+        # Get current date for context
+        current_date = datetime.now().strftime("%B %d, %Y")
 
-        # Pattern 1: "January 11, 2026" or "11 January 2026"
-        pattern1 = r'(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})'
-        match = re.search(pattern1, date_string, re.IGNORECASE)
-        if match:
-            day = int(match.group(1))
-            month_name = match.group(2)
-            year = int(match.group(3))
+        try:
+            # Truncate article text to first 2000 chars (dates are usually at top)
+            text_sample = article_text[:2000]
 
-            month_map = {
-                'january': 1, 'february': 2, 'march': 3, 'april': 4,
-                'may': 5, 'june': 6, 'july': 7, 'august': 8,
-                'september': 9, 'october': 10, 'november': 11, 'december': 12
-            }
-            month = month_map.get(month_name.lower(), 1)
+            # Create prompt
+            prompt_text = DATE_EXTRACTOR_PROMPT_TEMPLATE.format_messages(
+                current_date=current_date,
+                article_text=text_sample
+            )
 
-            try:
-                dt = datetime(year, month, day, tzinfo=timezone.utc)
+            # Call AI (using vision_model which is already initialized)
+            response = self.vision_model.invoke(prompt_text)
+
+            # Parse response
+            date_str = parse_date_response(response.content)
+
+            if date_str:
+                # Convert to ISO format with timezone
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                from datetime import timezone
+                dt = dt.replace(tzinfo=timezone.utc)
                 return dt.isoformat()
-            except ValueError:
-                pass
 
-        # Pattern 2: "2026-01-16"
-        pattern2 = r'(\d{4})-(\d{2})-(\d{2})'
-        match = re.search(pattern2, date_string)
-        if match:
-            try:
-                dt = datetime(
-                    int(match.group(1)),
-                    int(match.group(2)),
-                    int(match.group(3)),
-                    tzinfo=timezone.utc
-                )
-                return dt.isoformat()
-            except ValueError:
-                pass
+            return None
 
-        # Pattern 3: ISO format already
-        if 'T' in date_string:
-            try:
-                dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
-                return dt.isoformat()
-            except (ValueError, AttributeError):
-                pass
-
-        return None
+        except Exception as e:
+            print(f"      ⚠️ Date extraction failed: {e}")
+            return None
 
     def _is_within_timeframe(self, date_string: str, hours: int) -> bool:
         """
