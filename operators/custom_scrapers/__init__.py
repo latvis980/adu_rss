@@ -28,7 +28,6 @@ from operators.custom_scrapers.bauwelt import BauweltScraper
 from operators.custom_scrapers.gooood import GoooodScraper
 from operators.custom_scrapers.japan_architects import JapanArchitectsScraper
 from operators.custom_scrapers.domus import DomusScraper
-from operators.custom_scrapers.archidatum import ArchidatumScraper
 from operators.custom_scrapers.metalocus import MetalocusScraper
 from operators.custom_scrapers.metropolis import MetropolisScraper
 

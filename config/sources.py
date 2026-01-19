@@ -247,18 +247,6 @@ SOURCES = {
     },
 
     # =========================================================================
-    # TIER 2 - Africa
-    # =========================================================================
-
-    "archidatum": {
-        "name": "Archidatum",
-        "domains": ["archidatum.com", "www.archidatum.com"],
-        "tier": 2,
-        "region": "africa",
-        "custom_scraper": True,
-    },
-
-    # =========================================================================
     # TIER 2 - Latin America
     # =========================================================================
 
@@ -357,7 +345,7 @@ SOURCES = {
 #
 #   - MOVE TO SCRAPING metropolis: https://metropolismag.com/projects/
 #   - MOVE TO SCRAPING metalocus: https://www.metalocus.es/en (EUROPE)
-#   - MOVE TO SCRAPING archidatum: https://www.archidatum.com/ (AFRICA)
+#   - NO NEW PUBLICATIONS SINCE 2018 archidatum: https://www.archidatum.com/ (AFRICA)
 #   - MOVE TO SCRAPING domus: https://www.domusweb.it/ (EUROPE)
 
 # =============================================================================
