@@ -318,10 +318,15 @@ Do not include any explanation."""
                 await page.screenshot(path=screenshot_path, full_page=False)
                 print(f"[{self.source_id}] 📸 Screenshot saved: {screenshot_path}")
 
-                # Log screenshot stats
+                # Log screenshot stats and upload to R2
                 if self.stats and os_module.path.exists(screenshot_path):
                     size = os_module.path.getsize(screenshot_path)
-                    self.stats.log_screenshot(screenshot_path, size)
+
+                    # Upload screenshot to R2 for audit
+                    r2_path, r2_url = await self._upload_screenshot_to_r2(screenshot_path)
+
+                    # Log with R2 info
+                    self.stats.log_screenshot(screenshot_path, size, r2_path, r2_url)
 
                 # ============================================================
                 # Step 2: Extract Headlines with AI Vision

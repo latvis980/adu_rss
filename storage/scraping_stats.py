@@ -33,6 +33,8 @@ class ScrapingStats:
     screenshot_created: bool = False
     screenshot_path: Optional[str] = None
     screenshot_size_bytes: Optional[int] = None
+    screenshot_r2_path: Optional[str] = None      # <-- ADD THIS
+    screenshot_r2_url: Optional[str] = None
 
     # Vision AI extraction stats
     headlines_extracted_count: int = 0
@@ -67,11 +69,13 @@ class ScrapingStats:
     # Errors
     errors: List[str] = field(default_factory=list)
 
-    def log_screenshot(self, path: str, size_bytes: int):
+    def log_screenshot(self, path: str, size_bytes: int, r2_path: Optional[str] = None, r2_url: Optional[str] = None):
         """Log screenshot creation."""
         self.screenshot_created = True
         self.screenshot_path = path
         self.screenshot_size_bytes = size_bytes
+        self.screenshot_r2_path = r2_path
+        self.screenshot_r2_url = r2_url
 
     def log_headlines_extracted(self, headlines: List[str]):
         """Log headlines extracted from vision AI."""
@@ -141,12 +145,13 @@ class ScrapingStats:
 
         if self.screenshot_created:
             size_kb = self.screenshot_size_bytes / 1024 if self.screenshot_size_bytes else 0
-            print(f"📸 Screenshot: ✅ Created ({size_kb:.1f} KB)")
+            print(f"📸 Screenshot: Created ({size_kb:.1f} KB)")
+            if self.screenshot_r2_path:
+                print(f"   R2: {self.screenshot_r2_path}")
         else:
-            print(f"📸 Screenshot: ❌ Not created")
-        print()
+            print(f"📸 Screenshot: Not created")
 
-        print(f"🤖 Vision AI Extraction:")
+        print("🤖 Vision AI Extraction:")
         print(f"   • Total headlines extracted: {self.headlines_extracted_count}")
         if self.headlines_extracted:
             for i, h in enumerate(self.headlines_extracted[:5], 1):

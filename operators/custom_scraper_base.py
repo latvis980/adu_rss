@@ -19,7 +19,7 @@ import os
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 from urllib.parse import urljoin, urlparse
 from html import unescape
 
@@ -463,6 +463,34 @@ class BaseCustomScraper(ABC):
             source_name=self.source_name,
             base_url=self.base_url
         )
+
+    async def _upload_screenshot_to_r2(self, screenshot_path: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Upload screenshot to R2 for audit purposes.
+
+        Args:
+            screenshot_path: Local path to the screenshot file
+
+        Returns:
+            Tuple of (r2_path, r2_url) or (None, None) if upload failed
+        """
+        try:
+            # Read screenshot bytes
+            with open(screenshot_path, 'rb') as f:
+                screenshot_bytes = f.read()
+
+            # Initialize R2 client and upload
+            r2 = R2Storage()
+            r2_path, r2_url = r2.save_scraping_screenshot(self.source_id, screenshot_bytes)
+
+            print(f"[{self.source_id}] 📸 Screenshot uploaded to R2: {r2_path}")
+            return r2_path, r2_url
+
+        except Exception as e:
+            print(f"[{self.source_id}] ⚠️ Failed to upload screenshot to R2: {e}")
+            if self.stats:
+                self.stats.log_error(f"Screenshot upload failed: {str(e)}")
+            return None, None
 
     async def _upload_stats_to_r2(self):
         """Upload statistics report to R2."""
