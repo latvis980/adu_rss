@@ -455,7 +455,6 @@ async def run_pipeline(
             "gooood": GoooodScraper,
             "japan_architects": JapanArchitectsScraper,
             "domus": DomusScraper,
-            "archidatum": ArchidatumScraper,
             "metalocus": MetalocusScraper,
             "metropolis": MetropolisScraper,
         }
