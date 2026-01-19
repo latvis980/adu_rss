@@ -484,3 +484,48 @@ class R2Storage:
         except ClientError as e:
             print(f"   ❌ Failed to save stats: {e}")
             raise
+
+    def save_scraping_screenshot(
+        self,
+        source_id: str,
+        screenshot_bytes: bytes,
+        target_date: Optional[date] = None
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Save scraping screenshot to R2 storage for audit purposes.
+
+        Args:
+            source_id: Source identifier (e.g., 'bauwelt')
+            screenshot_bytes: PNG image bytes
+            target_date: Target date for the screenshot (defaults to today)
+
+        Returns:
+            Tuple of (storage_path, public_url or None)
+        """
+        if target_date is None:
+            target_date = date.today()
+
+        # Build path: scraping/YYYY-MM-DD/source_id_screenshot_HH-MM-SS.png
+        date_str = target_date.strftime("%Y-%m-%d")
+        timestamp = datetime.now().strftime("%H-%M-%S")
+        path = f"scraping/{date_str}/{source_id}_screenshot_{timestamp}.png"
+
+        try:
+            self.client.put_object(
+                Bucket=self.bucket_name,
+                Key=path,
+                Body=screenshot_bytes,
+                ContentType="image/png",
+                CacheControl="public, max-age=31536000"
+            )
+
+            public_url: Optional[str] = None
+            if self.public_url:
+                public_url = f"{self.public_url.rstrip('/')}/{path}"
+
+            print(f"   📸 Screenshot saved to R2: {path}")
+            return path, public_url
+
+        except ClientError as e:
+            print(f"   ❌ Failed to save screenshot: {e}")
+            raise
