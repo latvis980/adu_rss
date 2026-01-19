@@ -66,6 +66,19 @@ class ScrapingStats:
     # Final output stats
     final_articles_count: int = 0
 
+    # Final output stats
+    final_articles_count: int = 0
+
+    # ========================================
+    # NEW: Article tracking stats
+    # ========================================
+    articles_found_count: int = 0
+    articles_found: List[Dict[str, str]] = field(default_factory=list)
+    articles_skipped_count: int = 0
+    articles_skipped: List[Dict[str, str]] = field(default_factory=list)
+
+    # Errors
+    errors: List[str] = field(default_factory=list)
     # Errors
     errors: List[str] = field(default_factory=list)
 
@@ -121,6 +134,27 @@ class ScrapingStats:
     def log_final_count(self, count: int):
         """Log final article count."""
         self.final_articles_count = count
+
+    def log_final_count(self, count: int):
+        """Log final article count."""
+        self.final_articles_count = count
+
+    # ========================================
+    # NEW: Article tracking methods
+    # ========================================
+    def log_article_found(self, url: str, title: str = ""):
+        """Log an article that was found and will be processed."""
+        self.articles_found.append({"url": url, "title": title})
+        self.articles_found_count = len(self.articles_found)
+
+    def log_skipped(self, reason: str, url: str = "", title: str = ""):
+        """Log an article that was skipped."""
+        self.articles_skipped.append({"url": url, "title": title, "reason": reason})
+        self.articles_skipped_count = len(self.articles_skipped)
+
+    def log_error(self, error: str):
+        """Log an error."""
+        self.errors.append(error)
 
     def log_error(self, error: str):
         """Log an error."""
@@ -201,7 +235,12 @@ class ScrapingStats:
         print()
 
         print(f"📦 Final Output:")
+        print(f"   • Articles found: {self.articles_found_count}")
+        print(f"   • Articles skipped: {self.articles_skipped_count}")
         print(f"   • Articles returned: {self.final_articles_count}")
+        if self.articles_skipped:
+            for item in self.articles_skipped[:3]:
+                print(f"     ⏭️ {item.get('title', item.get('url', 'unknown'))[:50]}... ({item['reason']})")
         print()
 
         if self.errors:
