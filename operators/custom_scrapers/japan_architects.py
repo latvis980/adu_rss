@@ -303,7 +303,7 @@ Do not include any explanation."""
                     raise RuntimeError("Article tracker not initialized")
 
                 # Check which headlines are NEW
-                seen_headlines = await self.tracker.get_seen_headlines(self.source_id)
+                seen_headlines = await self.tracker.get_stored_headlines(self.source_id)
                 new_headlines = [h for h in current_headlines if h not in seen_headlines]
 
                 print(f"\n   📊 Status:")
