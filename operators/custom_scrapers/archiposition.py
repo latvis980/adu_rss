@@ -1,14 +1,21 @@
 # operators/custom_scrapers/archiposition.py
 """
-Archiposition Custom Scraper - HTML Pattern Approach (Simplified)
+Archiposition Custom Scraper - HTML Pattern Approach with Hero Image Extraction
 Scrapes architecture news from Archiposition (Chinese architecture magazine)
 
 Site: https://www.archiposition.com/category/1675
 Strategy: Extract links matching /items/ pattern, filter out section URLs
 
+Key Features:
+- HTML pattern extraction (no AI needed for URL discovery)
+- Hero image extraction from article pages (site lacks og:image)
+- Direct R2 upload of hero images
+- Date extraction from Chinese date formats
+
 Pattern Analysis:
 - Article links: /items/[short-hex-id] (e.g., /items/131941b2fa)
 - Section links to exclude: /items/competition, /items/spaceresearch, etc.
+- Hero images: First large image in .detail-content
 
 Section URLs (hardcoded exclusions):
 - /items/competition - 招标竞赛组织
@@ -40,12 +47,14 @@ from bs4 import BeautifulSoup
 
 from operators.custom_scraper_base import BaseCustomScraper, custom_scraper_registry
 from storage.article_tracker import ArticleTracker
+from storage.r2 import R2Storage
 
 
 class ArchipositionScraper(BaseCustomScraper):
     """
     HTML pattern-based custom scraper for Archiposition.
-    Extracts article links from HTML, filters out section URLs - no AI needed.
+    Extracts article links from HTML, filters out section URLs.
+    Handles hero image extraction since site lacks og:image meta tags.
     """
 
     source_id = "archiposition"
@@ -76,12 +85,19 @@ class ArchipositionScraper(BaseCustomScraper):
         """Initialize scraper with article tracker."""
         super().__init__()
         self.tracker: Optional[ArticleTracker] = None
+        self.r2: Optional[R2Storage] = None
 
     async def _ensure_tracker(self):
         """Ensure article tracker is connected."""
         if not self.tracker:
             self.tracker = ArticleTracker()
             await self.tracker.connect()
+
+    def _ensure_r2(self):
+        """Ensure R2 storage is initialized."""
+        if not self.r2:
+            self.r2 = R2Storage()
+            print(f"[{self.source_id}] R2 storage initialized")
 
     def _is_valid_article_slug(self, slug: str) -> bool:
         """
@@ -94,26 +110,35 @@ class ArchipositionScraper(BaseCustomScraper):
             slug: The URL slug after /items/
 
         Returns:
-            True if this is a real article
+            True if it's a valid article, False if it's a section
         """
-        # Exclude known section slugs
-        if slug.lower() in self.EXCLUDED_SLUGS:
+        # Check against known section slugs
+        if slug in self.EXCLUDED_SLUGS:
             return False
 
-        # Exclude slugs that start with '2018' (old section IDs)
-        if slug.startswith('2018'):
+        # Valid article IDs are short hex-like strings (8-12 chars)
+        # Section URLs tend to be longer or contain words
+        if len(slug) > 20:
             return False
 
-        # Valid article slugs are short hex-like strings (8-12 chars)
-        # They contain only alphanumeric characters
-        if len(slug) >= 6 and len(slug) <= 20 and slug.isalnum():
+        # Check if it looks like a hex ID (alphanumeric, mostly lowercase)
+        if re.match(r'^[a-f0-9]{8,12}$', slug):
+            return True
+
+        # Check for date-based IDs (old format: 20180525080701)
+        if re.match(r'^\d{14}$', slug):
+            # These are section pages, not articles
+            return False
+
+        # Allow other short alphanumeric slugs
+        if re.match(r'^[a-zA-Z0-9]{6,15}$', slug):
             return True
 
         return False
 
     def _extract_articles_from_html(self, html: str) -> List[Tuple[str, str]]:
         """
-        Extract article URLs and titles from HTML.
+        Extract article URLs and titles from category page HTML.
 
         Finds all /items/ links and filters out section URLs.
 
@@ -178,58 +203,168 @@ class ArchipositionScraper(BaseCustomScraper):
 
         return articles
 
-    async def _get_article_date(self, page, url: str) -> Optional[str]:
+    async def _get_article_metadata(self, page, url: str) -> dict:
         """
-        Visit article page and extract publication date.
+        Visit article page and extract date + hero image.
 
-        Looks for common date patterns in Chinese sites.
+        Archiposition doesn't have og:image, so we extract the first
+        large image from the article content.
 
         Args:
             page: Playwright page object
             url: Article URL
 
         Returns:
-            ISO format date string or None
+            Dict with 'date' (ISO string or None) and 'hero_image' (dict or None)
         """
+        result = {
+            'date': None,
+            'hero_image': None,
+            'title': None
+        }
+
         try:
             await page.goto(url, timeout=self.timeout, wait_until="domcontentloaded")
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(1500)  # Wait for images to load
 
-            # Get page content
-            html = await page.content()
+            # Extract metadata using JavaScript
+            metadata = await page.evaluate("""
+                () => {
+                    const result = {
+                        date_text: null,
+                        hero_image_url: null,
+                        title: null
+                    };
 
-            # Look for date patterns in HTML
-            # Common formats: YYYY-MM-DD, YYYY/MM/DD, YYYY年MM月DD日
-            date_patterns = [
-                # YYYY-MM-DD or YYYY/MM/DD
-                (r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', lambda m: (m.group(1), m.group(2), m.group(3))),
-                # YYYY年MM月DD日
-                (r'(\d{4})年(\d{1,2})月(\d{1,2})日', lambda m: (m.group(1), m.group(2), m.group(3))),
-            ]
+                    // Extract title from detail-title or h1
+                    const titleEl = document.querySelector('.detail-title') ||
+                                    document.querySelector('h1.user-content-item') ||
+                                    document.querySelector('h1');
+                    if (titleEl) {
+                        result.title = titleEl.textContent.trim();
+                    }
 
-            for pattern, extractor in date_patterns:
-                match = re.search(pattern, html)
-                if match:
-                    try:
-                        year, month, day = extractor(match)
-                        date_obj = datetime(
-                            year=int(year),
-                            month=int(month),
-                            day=int(day),
-                            tzinfo=timezone.utc
-                        )
-                        # Sanity check: not in the future, not too old
-                        now = datetime.now(timezone.utc)
-                        if date_obj <= now and date_obj > now - timedelta(days=365):
-                            return date_obj.isoformat()
-                    except ValueError:
-                        continue
+                    // Extract date from detail-tip (format: "编辑：xxx | 校对：xxx | 2026.01.16 09:53")
+                    const tipEl = document.querySelector('.detail-tip');
+                    if (tipEl) {
+                        result.date_text = tipEl.textContent.trim();
+                    }
 
-            return None
+                    // Extract hero image - first large image in detail-content
+                    // Archiposition doesn't have og:image, images are in article body
+                    const selectors = [
+                        '.detail-content img',
+                        '.detail-content figure img',
+                        'article img',
+                        '.post-content img'
+                    ];
+
+                    for (const selector of selectors) {
+                        const imgs = document.querySelectorAll(selector);
+                        for (const img of imgs) {
+                            // Get src from various attributes
+                            let src = img.src || img.dataset.src || img.getAttribute('data-src');
+                            if (!src) continue;
+
+                            // Skip small images (icons, logos)
+                            const width = img.naturalWidth || img.width || 0;
+                            const height = img.naturalHeight || img.height || 0;
+
+                            // Skip if dimensions are known and too small
+                            if (width > 0 && width < 300) continue;
+                            if (height > 0 && height < 200) continue;
+
+                            // Skip common non-content patterns
+                            const srcLower = src.toLowerCase();
+                            if (srcLower.includes('logo') ||
+                                srcLower.includes('icon') ||
+                                srcLower.includes('avatar') ||
+                                srcLower.includes('qrcode') ||
+                                srcLower.includes('weixin') ||
+                                srcLower.includes('wechat')) continue;
+
+                            // Found a valid hero image
+                            result.hero_image_url = src;
+                            break;
+                        }
+                        if (result.hero_image_url) break;
+                    }
+
+                    return result;
+                }
+            """)
+
+            # Parse title
+            if metadata.get('title'):
+                result['title'] = metadata['title']
+
+            # Parse date from Chinese format
+            if metadata.get('date_text'):
+                result['date'] = self._parse_chinese_date(metadata['date_text'])
+
+            # Build hero image dict
+            if metadata.get('hero_image_url'):
+                result['hero_image'] = {
+                    'url': metadata['hero_image_url'],
+                    'width': None,
+                    'height': None,
+                    'source': 'article-content'
+                }
+
+            return result
 
         except Exception as e:
-            print(f"[{self.source_id}] Date extraction error for {url}: {e}")
+            print(f"[{self.source_id}] Metadata extraction error for {url}: {e}")
+            return result
+
+    def _parse_chinese_date(self, text: str) -> Optional[str]:
+        """
+        Parse date from Chinese text.
+
+        Handles formats like:
+        - "2026.01.16 09:53"
+        - "2026-01-16"
+        - "2026/01/16"
+        - "2026年01月16日"
+
+        Args:
+            text: Text containing date
+
+        Returns:
+            ISO format date string or None
+        """
+        if not text:
             return None
+
+        # Date patterns to try
+        patterns = [
+            # YYYY.MM.DD HH:MM or YYYY.MM.DD
+            (r'(\d{4})\.(\d{1,2})\.(\d{1,2})', lambda m: (m.group(1), m.group(2), m.group(3))),
+            # YYYY-MM-DD or YYYY/MM/DD
+            (r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', lambda m: (m.group(1), m.group(2), m.group(3))),
+            # YYYY年MM月DD日
+            (r'(\d{4})年(\d{1,2})月(\d{1,2})日', lambda m: (m.group(1), m.group(2), m.group(3))),
+        ]
+
+        for pattern, extractor in patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    year, month, day = extractor(match)
+                    date_obj = datetime(
+                        year=int(year),
+                        month=int(month),
+                        day=int(day),
+                        tzinfo=timezone.utc
+                    )
+                    # Sanity check: not in the future, not too old
+                    now = datetime.now(timezone.utc)
+                    if date_obj <= now and date_obj > now - timedelta(days=365):
+                        return date_obj.isoformat()
+                except ValueError:
+                    continue
+
+        return None
 
     def _is_within_age_limit(self, date_iso: Optional[str]) -> bool:
         """Check if article date is within MAX_ARTICLE_AGE_DAYS."""
@@ -244,6 +379,61 @@ class ArchipositionScraper(BaseCustomScraper):
         except Exception:
             return True
 
+    async def _download_and_upload_hero_image(
+        self,
+        page,
+        hero_image: dict,
+        article: dict
+    ) -> Optional[dict]:
+        """
+        Download hero image and upload to R2.
+
+        Args:
+            page: Playwright page for downloading
+            hero_image: Dict with 'url' key
+            article: Article dict for building R2 path
+
+        Returns:
+            Updated hero_image dict with r2_path and r2_url, or None if failed
+        """
+        if not hero_image or not hero_image.get('url'):
+            return None
+
+        url = hero_image['url']
+
+        try:
+            # Ensure R2 is initialized
+            self._ensure_r2()
+
+            # Download image using page navigation
+            print(f"      Downloading hero image...")
+            response = await page.goto(url, timeout=15000)
+
+            if not response or not response.ok:
+                print(f"      Failed to download: HTTP {response.status if response else 'no response'}")
+                return hero_image
+
+            image_bytes = await response.body()
+            print(f"      Downloaded: {len(image_bytes)} bytes")
+
+            # Upload to R2
+            if self.r2 and image_bytes:
+                updated_hero = self.r2.save_hero_image(
+                    image_bytes=image_bytes,
+                    article=article,
+                    source=self.source_id
+                )
+
+                if updated_hero and updated_hero.get('r2_path'):
+                    print(f"      Uploaded to R2: {updated_hero['r2_path']}")
+                    return updated_hero
+
+            return hero_image
+
+        except Exception as e:
+            print(f"      Hero image error: {e}")
+            return hero_image
+
     async def fetch_articles(self, hours: int = 24) -> list[dict]:
         """
         Fetch new articles from Archiposition.
@@ -253,9 +443,10 @@ class ArchipositionScraper(BaseCustomScraper):
         2. Extract all /items/ links from HTML
         3. Filter out known section URLs
         4. Check database for new URLs
-        5. For new articles: visit page to get date
+        5. For new articles: visit page to get date + hero image
         6. Filter by date (within MAX_ARTICLE_AGE_DAYS)
-        7. Return minimal article dicts for main pipeline
+        7. Download and upload hero images to R2
+        8. Return article dicts for main pipeline
 
         Args:
             hours: Ignored (we use database tracking instead)
@@ -266,7 +457,7 @@ class ArchipositionScraper(BaseCustomScraper):
         # Initialize statistics tracking
         self._init_stats()
 
-        print(f"\n[{self.source_id}] 🔍 Starting HTML pattern scraping...")
+        print(f"\n[{self.source_id}] Starting HTML pattern scraping...")
         print(f"   URL: {self.base_url}")
 
         await self._ensure_tracker()
@@ -296,10 +487,10 @@ class ArchipositionScraper(BaseCustomScraper):
                 print(f"[{self.source_id}] Extracting articles from HTML...")
                 extracted = self._extract_articles_from_html(html)
 
-                print(f"[{self.source_id}] Found {len(extracted)} article links (after filtering sections)")
+                print(f"[{self.source_id}] Found {len(extracted)} article links")
 
                 if not extracted:
-                    print(f"[{self.source_id}] ⚠️ No articles found")
+                    print(f"[{self.source_id}] No articles found on page")
                     if self.stats:
                         self.stats.log_final_count(0)
                         self.stats.print_summary()
@@ -307,29 +498,33 @@ class ArchipositionScraper(BaseCustomScraper):
                     return []
 
                 # ============================================================
-                # Step 3: Check Database for New URLs
+                # Step 3: Check Database for New Articles
                 # ============================================================
-                if not self.tracker:
-                    raise RuntimeError("Article tracker not initialized")
-
                 all_urls = [url for url, _ in extracted]
-                seen_urls = await self.tracker.get_stored_headlines(self.source_id)
 
-                # Find new articles
-                new_articles_data = [
-                    (url, title)
-                    for url, title in extracted
-                    if url not in seen_urls
-                ]
+                if self.tracker:
+                    # Filter to only new URLs (not seen before)
+                    new_urls = await self.tracker.filter_new_articles(
+                        self.source_id,
+                        all_urls
+                    )
+                    # Keep only extracted tuples with new URLs
+                    new_url_set = set(new_urls)
+                    new_articles_data = [(url, title) for url, title in extracted if url in new_url_set]
+                else:
+                    new_articles_data = extracted
+                    new_urls = all_urls
 
-                print(f"[{self.source_id}] Database check:")
-                print(f"   Total extracted: {len(extracted)}")
-                print(f"   Already seen: {len(extracted) - len(new_articles_data)}")
-                print(f"   New articles: {len(new_articles_data)}")
+                print(f"[{self.source_id}] New articles: {len(new_articles_data)}")
+
+                if self.stats:
+                    self.stats.log_new_headlines(new_urls, len(extracted))
 
                 if not new_articles_data:
-                    print(f"[{self.source_id}] ✅ No new articles to process")
-                    await self.tracker.store_headlines(self.source_id, all_urls)
+                    print(f"[{self.source_id}] No new articles to process")
+                    # Store all URLs as seen
+                    if self.tracker:
+                        await self.tracker.mark_as_seen(self.source_id, all_urls)
                     if self.stats:
                         self.stats.log_final_count(0)
                         self.stats.print_summary()
@@ -337,23 +532,29 @@ class ArchipositionScraper(BaseCustomScraper):
                     return []
 
                 # ============================================================
-                # Step 4: Get Dates and Build Results
+                # Step 4: Get Metadata, Hero Images, and Build Results
                 # ============================================================
                 new_articles: list[dict] = []
                 skipped_old = 0
+                hero_images_found = 0
 
                 for url, title in new_articles_data[:self.MAX_NEW_ARTICLES]:
                     print(f"\n   Processing: {title[:50]}...")
 
-                    # Get publication date from article page
-                    date_iso = await self._get_article_date(page, url)
+                    # Get metadata from article page (date + hero image)
+                    metadata = await self._get_article_metadata(page, url)
 
+                    # Use extracted title if better than URL-based title
+                    if metadata.get('title') and len(metadata['title']) > len(title):
+                        title = metadata['title']
+
+                    date_iso = metadata.get('date')
                     if date_iso:
                         print(f"      Date: {date_iso[:10]}")
 
                     # Check date limit
                     if not self._is_within_age_limit(date_iso):
-                        print(f"      ⏭️ Skipped (too old)")
+                        print(f"      Skipped (too old)")
                         skipped_old += 1
                         if self.stats:
                             self.stats.log_skipped("too_old")
@@ -363,18 +564,37 @@ class ArchipositionScraper(BaseCustomScraper):
                     article = {
                         'title': title,
                         'link': url,
+                        'guid': url,
                         'source_id': self.source_id,
+                        'source_name': self.source_name,
+                        'custom_scraped': True,
                     }
 
                     if date_iso:
                         article['published'] = date_iso
+
+                    # Handle hero image
+                    hero_image = metadata.get('hero_image')
+                    if hero_image:
+                        print(f"      Hero image found: {hero_image['url'][:60]}...")
+                        hero_images_found += 1
+
+                        # Download and upload to R2
+                        updated_hero = await self._download_and_upload_hero_image(
+                            page, hero_image, article
+                        )
+
+                        if updated_hero:
+                            article['hero_image'] = updated_hero
+                    else:
+                        print(f"      No hero image found")
 
                     new_articles.append(article)
 
                     if self.stats:
                         self.stats.log_article_found(url)
 
-                    print(f"      ✅ Added")
+                    print(f"      Added")
 
                     # Small delay between article page visits
                     await asyncio.sleep(0.5)
@@ -382,14 +602,16 @@ class ArchipositionScraper(BaseCustomScraper):
                 # ============================================================
                 # Step 5: Store All URLs and Finalize
                 # ============================================================
-                await self.tracker.store_headlines(self.source_id, all_urls)
+                if self.tracker:
+                    await self.tracker.mark_as_seen(self.source_id, all_urls)
 
                 # Final Summary
-                print(f"\n[{self.source_id}] 📊 Processing Summary:")
+                print(f"\n[{self.source_id}] Processing Summary:")
                 print(f"   Articles found: {len(extracted)}")
                 print(f"   New articles: {len(new_articles_data)}")
                 print(f"   Skipped (too old): {skipped_old}")
-                print(f"   ✅ Successfully scraped: {len(new_articles)}")
+                print(f"   Hero images found: {hero_images_found}")
+                print(f"   Successfully scraped: {len(new_articles)}")
 
                 # Log final count and upload stats
                 if self.stats:
@@ -403,7 +625,7 @@ class ArchipositionScraper(BaseCustomScraper):
                 await page.close()
 
         except Exception as e:
-            print(f"[{self.source_id}] ❌ Error in scraping: {e}")
+            print(f"[{self.source_id}] Error in scraping: {e}")
             if self.stats:
                 self.stats.log_error(f"Critical error: {str(e)}")
                 self.stats.print_summary()
@@ -430,9 +652,9 @@ custom_scraper_registry.register(ArchipositionScraper)
 # =============================================================================
 
 async def test_archiposition_scraper():
-    """Test the HTML pattern scraper."""
+    """Test the HTML pattern scraper with hero image extraction."""
     print("=" * 60)
-    print("Testing Archiposition HTML Pattern Scraper")
+    print("Testing Archiposition Scraper (with Hero Image Extraction)")
     print("=" * 60)
 
     scraper = ArchipositionScraper()
@@ -443,7 +665,7 @@ async def test_archiposition_scraper():
         connected = await scraper.test_connection()
 
         if not connected:
-            print("   ❌ Connection failed")
+            print("   Connection failed")
             return
 
         # Show tracker stats
@@ -459,7 +681,7 @@ async def test_archiposition_scraper():
                 print(f"   Newest: {stats['newest_seen']}")
 
         # Fetch new articles
-        print("\n3. Running HTML pattern scraping...")
+        print("\n3. Running scraping with hero image extraction...")
         articles = await scraper.fetch_articles(hours=24)
 
         print(f"\n   Found {len(articles)} NEW articles")
@@ -472,6 +694,16 @@ async def test_archiposition_scraper():
                 print(f"   Title: {article['title'][:60]}...")
                 print(f"   Link: {article['link']}")
                 print(f"   Published: {article.get('published', 'No date')}")
+
+                hero = article.get('hero_image')
+                if hero:
+                    print(f"   Hero Image URL: {hero.get('url', 'N/A')[:60]}...")
+                    if hero.get('r2_path'):
+                        print(f"   R2 Path: {hero['r2_path']}")
+                    if hero.get('r2_url'):
+                        print(f"   R2 URL: {hero['r2_url'][:60]}...")
+                else:
+                    print(f"   Hero Image: None")
         else:
             print("\n4. No new articles (all previously seen)")
 
