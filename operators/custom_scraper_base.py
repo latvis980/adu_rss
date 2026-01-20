@@ -514,6 +514,88 @@ class BaseCustomScraper(ABC):
             if self.stats:
                 self.stats.log_error(f"Stats upload failed: {str(e)}")
 
+    async def _download_and_save_hero_image(
+        self,
+        page,
+        image_url: str,
+        article: dict
+    ) -> Optional[dict]:
+        """
+        Download hero image and save to R2 storage.
+
+        This method handles the full flow:
+        1. Download image bytes via Playwright
+        2. Upload to R2 storage
+        3. Return updated hero_image dict with r2_path and r2_url
+
+        Args:
+            page: Playwright page object (for downloading)
+            image_url: URL of the image to download
+            article: Article dict (needed for slug generation)
+
+        Returns:
+            Updated hero_image dict with r2_path/r2_url, or None if failed
+        """
+        if not image_url:
+            return None
+
+        try:
+            # Create a new page for downloading the image
+            context = page.context
+            download_page = await context.new_page()
+
+            try:
+                # Download image
+                response = await download_page.goto(image_url, timeout=15000)
+
+                if not response or not response.ok:
+                    print(f"[{self.source_id}]    Failed to download image: HTTP {response.status if response else 'no response'}")
+                    return None
+
+                image_bytes = await response.body()
+
+                if not image_bytes or len(image_bytes) < 1000:
+                    print(f"[{self.source_id}]    Image too small or empty: {len(image_bytes) if image_bytes else 0} bytes")
+                    return None
+
+                print(f"[{self.source_id}]    Downloaded image: {len(image_bytes)} bytes")
+
+            finally:
+                await download_page.close()
+
+            # Initialize R2 and save
+            from storage.r2 import R2Storage
+            r2 = R2Storage()
+
+            # Create hero_image dict for the article
+            hero_image = {
+                "url": image_url,
+                "width": None,
+                "height": None,
+                "source": "custom_scraper"
+            }
+
+            # Temporarily add hero_image to article for save_hero_image
+            article["hero_image"] = hero_image
+
+            # Save to R2
+            updated_hero = r2.save_hero_image(
+                image_bytes=image_bytes,
+                article=article,
+                source=self.source_id
+            )
+
+            if updated_hero and updated_hero.get("r2_path"):
+                print(f"[{self.source_id}]    Saved to R2: {updated_hero.get('r2_path')}")
+                return updated_hero
+            else:
+                print(f"[{self.source_id}]    Failed to save to R2")
+                return hero_image  # Return original without r2 info
+
+        except Exception as e:
+            print(f"[{self.source_id}]    Hero image error: {e}")
+            return None
+
 
 # =============================================================================
 # Custom Scraper Registry
