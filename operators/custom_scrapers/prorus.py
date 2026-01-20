@@ -1,19 +1,23 @@
 # operators/custom_scrapers/prorus.py
 """
-ProRus Custom Scraper - Visual AI Approach
+ProRus Custom Scraper - HTTP Pattern Approach (Simplified)
 Scrapes architecture news from ProRus.ru (Russian architecture magazine)
 
 Site: https://prorus.ru/projects/
-Challenge: None - straightforward access
+Strategy: Extract links from article-item-title divs
 
-Visual Scraping Strategy:
-1. Take screenshot of projects page
-2. Use GPT-4o vision to extract article headlines
-3. On first run: Store all headlines in database as "seen"
-4. On subsequent runs: Only process NEW headlines (not in database)
-5. Find headline text in HTML coupled with link using AI
-6. Click link to get publication date and metadata
-7. Continue with standard scraping logic
+Pattern Analysis:
+- Article structure: <div class="article-item-title"><a href="/projects/article-slug/">Title</a></div>
+- Article URLs: /projects/article-slug/ (transliterated Russian, e.g., /projects/launzh-bar-g-lounge-v-tolyatti/)
+- Non-article URLs: URLs with Cyrillic letters are tag pages, not articles
+
+Architecture (Simplified):
+- Custom scraper discovers article URLs from projects page (no article page visits)
+- Article tracker handles new/seen filtering (with TEST_MODE support)
+- Main pipeline handles: content scraping, hero image extraction (og:image), AI filtering
+
+On first run: All homepage articles marked as seen
+On subsequent runs: Only new articles returned for processing
 
 Usage:
     scraper = ProRusScraper()
@@ -22,36 +26,36 @@ Usage:
 """
 
 import asyncio
-import base64
-from typing import Optional, List, cast
-from datetime import datetime, timezone
+import re
+from typing import Optional, List, Tuple
+from urllib.parse import urljoin
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
+from bs4 import BeautifulSoup
 
 from operators.custom_scraper_base import BaseCustomScraper, custom_scraper_registry
 from storage.article_tracker import ArticleTracker
-from prompts.homepage_analyzer import HOMEPAGE_ANALYZER_PROMPT_TEMPLATE, parse_headlines
 
 
 class ProRusScraper(BaseCustomScraper):
     """
-    Visual AI-powered custom scraper for ProRus
-    Uses GPT-4o vision to identify articles on projects page.
+    HTTP pattern-based custom scraper for ProRus.
+    Extracts article URLs from article-item-title divs.
     """
 
     source_id = "prorus"
     source_name = "ProRus"
     base_url = "https://prorus.ru/projects/"
 
-    # Configuration: Maximum age of articles to process (in days)
-    MAX_ARTICLE_AGE_DAYS = 14  # Today + yesterday
+    # Configuration
+    MAX_NEW_ARTICLES = 10
+
+    # Pattern to detect Cyrillic characters (tag pages use Cyrillic URLs)
+    CYRILLIC_PATTERN = re.compile(r'[\u0400-\u04FF]')
 
     def __init__(self):
-        """Initialize scraper with article tracker and vision model."""
+        """Initialize scraper with article tracker."""
         super().__init__()
         self.tracker: Optional[ArticleTracker] = None
-        self.vision_model: Optional[ChatOpenAI] = None
 
     async def _ensure_tracker(self):
         """Ensure article tracker is connected."""
@@ -59,393 +63,211 @@ class ProRusScraper(BaseCustomScraper):
             self.tracker = ArticleTracker()
             await self.tracker.connect()
 
-    def _ensure_vision_model(self):
-        """Ensure vision model is initialized."""
-        if not self.vision_model:
-            import os
-            api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY not set")
-
-            api_key_str = cast(str, api_key)
-
-            self.vision_model = ChatOpenAI(
-                model="gpt-4o-mini",
-                api_key=api_key_str,
-                temperature=0.1  # Low temperature for consistent extraction
-            )
-            print(f"[{self.source_id}] Vision model initialized")
-
-    async def _analyze_homepage_screenshot(self, screenshot_path: str) -> List[str]:
+    def _is_valid_article_url(self, href: str) -> bool:
         """
-        Analyze homepage screenshot with GPT-4o vision to extract headlines.
+        Check if URL is a valid article URL.
+
+        Valid articles:
+        - Start with /projects/
+        - Have content after /projects/
+        - Use transliterated (Latin) characters, not Cyrillic
+        - End with /
 
         Args:
-            screenshot_path: Path to screenshot PNG
+            href: URL path to check
 
         Returns:
-            List of article headlines
+            True if valid article URL
         """
-        self._ensure_vision_model()
+        # Must start with /projects/
+        if not href.startswith('/projects/'):
+            return False
 
-        print(f"[{self.source_id}] 📸 Analyzing screenshot with AI vision...")
+        # Must have content after /projects/
+        slug = href.replace('/projects/', '').strip('/')
+        if not slug or len(slug) < 3:
+            return False
 
-        # Read and encode screenshot
-        with open(screenshot_path, 'rb') as f:
-            image_data = base64.b64encode(f.read()).decode('utf-8')
+        # Exclude URLs with Cyrillic characters (these are tag pages)
+        if self.CYRILLIC_PATTERN.search(href):
+            return False
 
-        # Create vision message
-        message = HumanMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": HOMEPAGE_ANALYZER_PROMPT_TEMPLATE.format()
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{image_data}"
-                    }
-                }
-            ]
-        )
+        return True
 
-        # Get response
-        if not self.vision_model:
-            raise RuntimeError("Vision model not initialized")
-
-        response = await asyncio.to_thread(
-            self.vision_model.invoke,
-            [message]
-        )
-
-        # Parse headlines
-        response_text = response.content if hasattr(response, 'content') else str(response)
-        if not isinstance(response_text, str):
-            response_text = str(response_text)
-
-        headlines = parse_headlines(response_text)
-
-        print(f"[{self.source_id}] ✅ Extracted {len(headlines)} headlines from screenshot")
-        return headlines
-
-    async def _find_headline_in_html_with_ai(self, page, headline: str) -> Optional[dict]:
+    def _extract_articles_from_html(self, html: str) -> List[Tuple[str, str]]:
         """
-        Use AI to find the article link for a headline by analyzing HTML context.
-        
+        Extract article URLs and titles from HTML.
+
+        Looks for pattern: <div class="article-item-title"><a href="...">Title</a></div>
+
         Args:
-            page: Playwright page object
-            headline: Headline text to search for
-            
+            html: Page HTML content
+
         Returns:
-            Dict with title, link, description, image or None
+            List of tuples: (url, title) - deduplicated
         """
-        self._ensure_vision_model()
-        
-        # Extract relevant HTML context around potential article links
-        html_context = await page.evaluate("""
-            (headline) => {
-                // Find all article-like containers
-                const containers = document.querySelectorAll(
-                    'article, .post, [class*="post"], [class*="item"], [class*="card"], [class*="project"]'
-                );
-                
-                const articleData = [];
-                
-                containers.forEach((container, index) => {
-                    // Get all links in this container
-                    const links = container.querySelectorAll('a[href]');
-                    
-                    if (links.length === 0) return;
-                    
-                    // Get the main link (usually the first or largest)
-                    let mainLink = null;
-                    let mainLinkText = '';
-                    
-                    links.forEach(link => {
-                        const text = link.textContent.trim();
-                        if (text.length > mainLinkText.length) {
-                            mainLink = link;
-                            mainLinkText = text;
-                        }
-                    });
-                    
-                    if (!mainLink) return;
-                    
-                    // Extract data
-                    const href = mainLink.href;
-                    const linkText = mainLinkText;
-                    
-                    // Get description
-                    const descEl = container.querySelector('p, .excerpt, [class*="excerpt"], [class*="desc"]');
-                    const description = descEl ? descEl.textContent.trim().substring(0, 150) : '';
-                    
-                    // Get image
-                    const imgEl = container.querySelector('img');
-                    const imageUrl = imgEl ? imgEl.src : null;
-                    
-                    // Only include if has meaningful text
-                    if (linkText.length > 5 && href.includes('/')) {
-                        articleData.push({
-                            index: index,
-                            link_text: linkText,
-                            href: href,
-                            description: description,
-                            image_url: imageUrl
-                        });
-                    }
-                });
-                
-                return articleData;
-            }
-        """, headline)
+        soup = BeautifulSoup(html, 'html.parser')
+        seen_urls: set[str] = set()
+        articles: List[Tuple[str, str]] = []
 
-        if not html_context:
-            return None
+        # Find all article-item-title divs
+        title_divs = soup.find_all('div', class_='article-item-title')
 
-        # Prepare context for AI analysis
-        context_text = f"Looking for headline: '{headline}'\n\n"
-        context_text += "Article containers found on page:\n"
-        
-        for item in html_context[:15]:  # Limit to prevent token overflow
-            context_text += f"\n--- Container {item['index']} ---\n"
-            context_text += f"Link text: {item['link_text']}\n"
-            context_text += f"URL: {item['href']}\n"
-            if item['description']:
-                context_text += f"Description: {item['description']}\n"
+        for div in title_divs:
+            # Find the link inside
+            link = div.find('a', href=True)
+            if not link:
+                continue
 
-        # Ask AI to match the headline
-        prompt = f"""Given this headline: "{headline}"
+            href = link.get('href', '')
 
-Which of these article containers is the best match? Consider:
-1. Semantic similarity (meaning, not just exact words)
-2. Context clues (description, URL patterns). On prorus.ru, project URLs typically are transliterated headline, words separated by hyphens, e.g. ehkspozicionno-obrazovatelnyj-centr-planeta-okean-v-kaliningrade/. URLS with Slavis letters are links to tag pages, not individual artices.
-3. Partial matches are OK if context is clear
+            # Check if valid article URL
+            if not self._is_valid_article_url(href):
+                continue
 
-{context_text}
+            # Build full URL
+            full_url = urljoin("https://prorus.ru", href)
 
-Respond with ONLY the container index number (e.g., "3") or "NONE" if no good match.
-Do not include any explanation."""
+            # Ensure trailing slash
+            if not full_url.endswith('/'):
+                full_url = full_url + '/'
 
-        if not self.vision_model:
-            raise RuntimeError("Vision model not initialized")
+            # DEDUPLICATION: Skip if already seen
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
 
-        ai_response = await asyncio.to_thread(
-            self.vision_model.invoke,
-            [HumanMessage(content=prompt)]
-        )
+            # Get title from link text
+            title = link.get_text(strip=True)
 
-        response_text = ai_response.content if hasattr(ai_response, 'content') else str(ai_response)
-        if not isinstance(response_text, str):
-            response_text = str(response_text)
-        
-        response_clean = response_text.strip().upper()
+            # If no title, use slug
+            if not title or len(title) < 3:
+                slug = href.strip('/').split('/')[-1]
+                title = slug.replace('-', ' ').title()
 
-        if response_clean == "NONE":
-            return None
+            # Clean title
+            title = ' '.join(title.split())[:200]
 
-        # Extract index number
-        import re
-        match = re.search(r'\d+', response_clean)
-        if not match:
-            return None
+            if title:
+                articles.append((full_url, title))
 
-        selected_index = int(match.group(0))
-
-        # Find the matching container
-        for item in html_context:
-            if item['index'] == selected_index:
-                return {
-                    'title': item['link_text'],
-                    'link': item['href'],
-                    'description': item['description'],
-                    'image_url': item['image_url']
-                }
-
-        return None
+        return articles
 
     async def fetch_articles(self, hours: int = 24) -> list[dict]:
         """
-        Fetch new articles using visual AI approach.
+        Fetch new articles from ProRus.
+
+        Workflow:
+        1. Load projects page
+        2. Extract all article links from article-item-title divs
+        3. Check database for new URLs
+        4. Return minimal article dicts for new URLs
+        5. Main pipeline handles: content, hero image (og:image), dates
 
         Args:
             hours: Ignored (we use database tracking instead)
 
         Returns:
-            List of article dicts
+            List of minimal article dicts
         """
+        # Initialize statistics tracking
+        self._init_stats()
+
+        print(f"[{self.source_id}] Starting HTTP pattern scraping...")
+
         await self._ensure_tracker()
-        
+
         try:
             page = await self._create_page()
 
             try:
+                # ============================================================
+                # Step 1: Load Projects Page
+                # ============================================================
                 print(f"[{self.source_id}] Loading projects page...")
                 await page.goto(self.base_url, timeout=self.timeout, wait_until="networkidle")
                 await page.wait_for_timeout(2000)
 
-                # Take screenshot
-                screenshot_path = f"/tmp/{self.source_id}_homepage.png"
-                await page.screenshot(path=screenshot_path, full_page=False)
-                print(f"[{self.source_id}] Screenshot saved to {screenshot_path}")
+                # Get page HTML
+                html = await page.content()
 
-                # Step 1: Extract headlines from screenshot using AI vision
-                current_headlines = await self._analyze_homepage_screenshot(screenshot_path)
+                # ============================================================
+                # Step 2: Extract Article Links
+                # ============================================================
+                extracted = self._extract_articles_from_html(html)
+                print(f"[{self.source_id}] Found {len(extracted)} article links")
 
-                if not current_headlines:
-                    print(f"[{self.source_id}] No headlines found in screenshot")
+                if not extracted:
+                    print(f"[{self.source_id}] No articles found")
+                    if self.stats:
+                        self.stats.log_final_count(0)
+                        self.stats.print_summary()
+                        await self._upload_stats_to_r2()
                     return []
 
-                # Step 2: Check database for previously seen headlines
+                # ============================================================
+                # Step 3: Check Database for New URLs
+                # ============================================================
                 if not self.tracker:
                     raise RuntimeError("Article tracker not initialized")
 
-                seen_headlines = await self.tracker.get_stored_headlines(self.source_id)
-                new_headlines = [h for h in current_headlines if h not in seen_headlines]
+                all_urls = [url for url, _ in extracted]
 
-                print(f"[{self.source_id}] Headlines breakdown:")
-                print(f"   Total extracted: {len(current_headlines)}")
-                print(f"   Previously seen: {len(current_headlines) - len(new_headlines)}")
-                print(f"   New to process: {len(new_headlines)}")
+                # Use filter_new_articles to get only new URLs
+                new_urls = await self.tracker.filter_new_articles(self.source_id, all_urls)
 
-                if not new_headlines:
-                    print(f"[{self.source_id}] No new headlines - all previously seen")
+                # Build lookup for titles
+                url_to_title = {url: title for url, title in extracted}
+
+                print(f"[{self.source_id}] Database check:")
+                print(f"   Total extracted: {len(extracted)}")
+                print(f"   Already seen: {len(extracted) - len(new_urls)}")
+                print(f"   New articles: {len(new_urls)}")
+
+                # ============================================================
+                # Step 4: Mark All URLs as Seen
+                # ============================================================
+                await self.tracker.mark_as_seen(self.source_id, all_urls)
+
+                if not new_urls:
+                    print(f"[{self.source_id}] No new articles to process")
+                    if self.stats:
+                        self.stats.log_final_count(0)
+                        self.stats.print_summary()
+                        await self._upload_stats_to_r2()
                     return []
 
-                # Limit processing
-                MAX_NEW = 10
-                if len(new_headlines) > MAX_NEW:
-                    print(f"[{self.source_id}] Limiting to {MAX_NEW} newest headlines")
-                    new_headlines = new_headlines[:MAX_NEW]
+                # ============================================================
+                # Step 5: Create Minimal Article Dicts
+                # ============================================================
+                new_articles: list[dict] = []
 
-                # Step 3: Process each new headline
-                new_articles = []
-                skipped_old = 0
-                skipped_no_link = 0
+                for url in new_urls[:self.MAX_NEW_ARTICLES]:
+                    title = url_to_title.get(url, url.strip('/').split('/')[-1].replace('-', ' ').title())
 
-                for i, headline in enumerate(new_headlines, 1):
-                    print(f"\n[{self.source_id}] Processing headline {i}/{len(new_headlines)}")
-                    print(f"   Headline: {headline[:60]}...")
+                    # Create minimal article dict
+                    # Main pipeline will extract: content, hero image (og:image), date
+                    article = self._create_minimal_article_dict(
+                        title=title,
+                        link=url,
+                        published=None  # Will be extracted by main pipeline
+                    )
 
-                    try:
-                        # Use AI to find this headline in HTML
-                        homepage_data = await self._find_headline_in_html_with_ai(page, headline)
-
-                        if not homepage_data or not homepage_data.get('link'):
-                            print(f"      ⚠️  Could not find article link")
-                            skipped_no_link += 1
-                            continue
-
-                        url = homepage_data['link']
-                        print(f"      🔗 Found link: {url}")
-
-                        # Navigate to article page
-                        await page.goto(url, timeout=self.timeout)
-                        await page.wait_for_timeout(1000)
-
-                        # Extract metadata from article page
-                        article_metadata = await page.evaluate("""
-                            () => {
-                                // Get publication date
-                                const dateEl = document.querySelector(
-                                    'time[datetime], .date, [class*="date"], [class*="time"]'
-                                );
-                                const dateText = dateEl ? 
-                                    (dateEl.getAttribute('datetime') || dateEl.textContent.trim()) : 
-                                    '';
-
-                                // Get og:image
-                                const ogImage = document.querySelector('meta[property="og:image"]');
-                                const heroImageUrl = ogImage ? ogImage.content : null;
-
-                                return {
-                                    date_text: dateText,
-                                    hero_image_url: heroImageUrl
-                                };
-                            }
-                        """)
-
-                        # Parse date
-                        published = self._parse_date(article_metadata['date_text'])
-
-                        # DATE FILTERING: Only process articles from today/yesterday
-                        if published:
-                            article_date = datetime.fromisoformat(published.replace('Z', '+00:00'))
-                            current_date = datetime.now(timezone.utc)
-                            days_old = (current_date - article_date).days
-
-                            if days_old > self.MAX_ARTICLE_AGE_DAYS:
-                                print(f"      ⏭️  Skipping old article ({days_old} days old)")
-                                skipped_old += 1
-                                continue
-
-                            print(f"      ✅ Fresh article ({days_old} day(s) old)")
-                        else:
-                            print(f"      ⚠️ No date found - including anyway")
-
-                        # Build hero image
-                        hero_image = None
-                        if article_metadata.get('hero_image_url'):
-                            hero_image = {
-                                "url": article_metadata['hero_image_url'],
-                                "width": None,
-                                "height": None,
-                                "source": "scraper"
-                            }
-                        elif homepage_data.get('image_url'):
-                            hero_image = {
-                                "url": homepage_data['image_url'],
-                                "width": None,
-                                "height": None,
-                                "source": "scraper"
-                            }
-
-                        # Create article dict
-                        article = self._create_article_dict(
-                            title=homepage_data['title'],
-                            link=url,
-                            description=homepage_data.get('description', ''),
-                            published=published,
-                            hero_image=hero_image
-                        )
-
-                        if self._validate_article(article):
-                            new_articles.append(article)
-
-                            # Update database with URL
-                            if not self.tracker:
-                                raise RuntimeError("Article tracker not initialized")
-
-                            await self.tracker.update_headline_url(
-                                self.source_id,
-                                headline,
-                                url
-                            )
-
-                        # Small delay
-                        await asyncio.sleep(0.5)
-
-                        # Go back to projects page for next headline
-                        await page.goto(self.base_url, timeout=self.timeout)
-                        await page.wait_for_timeout(1000)
-
-                    except Exception as e:
-                        print(f"      ⚠️ Error processing headline: {e}")
-                        continue
-
-                # Store ALL current headlines (for next run)
-                if not self.tracker:
-                    raise RuntimeError("Article tracker not initialized")
-
-                await self.tracker.store_headlines(self.source_id, current_headlines)
+                    if self._validate_article(article):
+                        new_articles.append(article)
+                        print(f"[{self.source_id}]    Added: {title[:50]}...")
 
                 # Final Summary
-                print(f"\n[{self.source_id}] 📊 Processing Summary:")
-                print(f"   Headlines extracted: {len(current_headlines)}")
-                print(f"   New headlines: {len(new_headlines)}")
-                print(f"   Skipped (too old): {skipped_old}")
-                print(f"   Skipped (no link): {skipped_no_link}")
-                print(f"   ✅ Successfully scraped: {len(new_articles)}")
+                print(f"\n[{self.source_id}] Processing Summary:")
+                print(f"   Articles found: {len(extracted)}")
+                print(f"   New articles: {len(new_urls)}")
+                print(f"   Returning to pipeline: {len(new_articles)}")
+
+                # Log final count and upload stats
+                if self.stats:
+                    self.stats.log_final_count(len(new_articles))
+                    self.stats.print_summary()
+                    await self._upload_stats_to_r2()
 
                 return new_articles
 
@@ -453,7 +275,11 @@ Do not include any explanation."""
                 await page.close()
 
         except Exception as e:
-            print(f"[{self.source_id}] Error in visual scraping: {e}")
+            print(f"[{self.source_id}] Error in scraping: {e}")
+            if self.stats:
+                self.stats.log_error(f"Critical error: {str(e)}")
+                self.stats.print_summary()
+                await self._upload_stats_to_r2()
             import traceback
             traceback.print_exc()
             return []
@@ -476,10 +302,18 @@ custom_scraper_registry.register(ProRusScraper)
 # =============================================================================
 
 async def test_prorus_scraper():
-    """Test the visual AI scraper."""
+    """Test the HTTP pattern scraper."""
     print("=" * 60)
-    print("Testing ProRus Visual AI Scraper")
+    print("Testing ProRus HTTP Pattern Scraper")
     print("=" * 60)
+
+    # Show TEST_MODE status
+    from storage.article_tracker import ArticleTracker
+    print(f"\nTEST_MODE: {ArticleTracker.TEST_MODE}")
+    if ArticleTracker.TEST_MODE:
+        print("   All articles will appear as 'new' (ignoring database)")
+    else:
+        print("   Normal mode - filtering seen articles")
 
     scraper = ProRusScraper()
 
@@ -489,30 +323,26 @@ async def test_prorus_scraper():
         connected = await scraper.test_connection()
 
         if not connected:
-            print("   ❌ Connection failed")
+            print("   Connection failed")
             return
 
         # Show tracker stats
         print("\n2. Checking tracker stats...")
         await scraper._ensure_tracker()
 
-        if not scraper.tracker:
-            print("   ⚠️ Tracker not initialized")
-            return
-
-        stats = await scraper.tracker.get_stats(source_id="prorus")
-
-        print(f"   Total articles in database: {stats['total_articles']}")
-        if stats['oldest_seen']:
-            print(f"   Oldest: {stats['oldest_seen']}")
-        if stats['newest_seen']:
-            print(f"   Newest: {stats['newest_seen']}")
+        if scraper.tracker:
+            stats = await scraper.tracker.get_stats(source_id="prorus")
+            print(f"   Total articles in database: {stats['total_articles']}")
+            if stats['oldest_seen']:
+                print(f"   Oldest: {stats['oldest_seen']}")
+            if stats['newest_seen']:
+                print(f"   Newest: {stats['newest_seen']}")
 
         # Fetch new articles
-        print("\n3. Running visual AI scraping (max 10 new articles)...")
+        print("\n3. Running HTTP pattern scraping...")
         articles = await scraper.fetch_articles(hours=24)
 
-        print(f"\n   ✅ Found {len(articles)} NEW articles")
+        print(f"\n   Found {len(articles)} NEW articles")
 
         # Display articles
         if articles:
@@ -521,8 +351,6 @@ async def test_prorus_scraper():
                 print(f"\n   --- Article {i} ---")
                 print(f"   Title: {article['title'][:60]}...")
                 print(f"   Link: {article['link']}")
-                print(f"   Published: {article.get('published', 'No date')}")
-                print(f"   Hero Image: {'Yes' if article.get('hero_image') else 'No'}")
         else:
             print("\n4. No new articles (all previously seen)")
 
@@ -535,5 +363,4 @@ async def test_prorus_scraper():
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(test_prorus_scraper())
