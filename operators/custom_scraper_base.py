@@ -23,7 +23,6 @@ from typing import Optional, Any, Tuple
 from urllib.parse import urljoin, urlparse
 from html import unescape
 
-from storage.scraping_stats import ScrapingStats
 from storage.r2 import R2Storage
 import os as os_module
 
@@ -33,7 +32,6 @@ from playwright.async_api import (
     Page,
     TimeoutError as PlaywrightTimeoutError
 )
-
 
 class BaseCustomScraper(ABC):
     """
@@ -62,8 +60,6 @@ class BaseCustomScraper(ABC):
         self.browser: Optional[Browser] = None
         self.playwright = None
         self.timeout = 20000  # 20 seconds
-        self.stats: Optional[ScrapingStats] = None
-
 
         # User-Agent to avoid blocks
         self.user_agent = (
@@ -455,64 +451,6 @@ class BaseCustomScraper(ABC):
         except Exception as e:
             print(f"[{self.source_id}] Connection test failed: {e}")
             return False
-
-    def _init_stats(self):
-        """Initialize statistics tracking for this run."""
-        self.stats = ScrapingStats(
-            source_id=self.source_id,
-            source_name=self.source_name,
-            base_url=self.base_url
-        )
-
-    async def _upload_screenshot_to_r2(self, screenshot_path: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Upload screenshot to R2 for audit purposes.
-
-        Args:
-            screenshot_path: Local path to the screenshot file
-
-        Returns:
-            Tuple of (r2_path, r2_url) or (None, None) if upload failed
-        """
-        try:
-            # Read screenshot bytes
-            with open(screenshot_path, 'rb') as f:
-                screenshot_bytes = f.read()
-
-            # Initialize R2 client and upload
-            r2 = R2Storage()
-            r2_path, r2_url = r2.save_scraping_screenshot(self.source_id, screenshot_bytes)
-
-            print(f"[{self.source_id}] 📸 Screenshot uploaded to R2: {r2_path}")
-            return r2_path, r2_url
-
-        except Exception as e:
-            print(f"[{self.source_id}] ⚠️ Failed to upload screenshot to R2: {e}")
-            if self.stats:
-                self.stats.log_error(f"Screenshot upload failed: {str(e)}")
-            return None, None
-
-    async def _upload_stats_to_r2(self):
-        """Upload statistics report to R2."""
-        if not self.stats:
-            return
-
-        try:
-            # Initialize R2 client
-            r2 = R2Storage()
-
-            # Convert stats to JSON
-            stats_json = self.stats.to_json()
-
-            # Upload to R2
-            path = r2.save_scraping_stats(self.source_id, stats_json)
-
-            print(f"[{self.source_id}] ✅ Statistics uploaded to R2: {path}")
-
-        except Exception as e:
-            print(f"[{self.source_id}] ⚠️ Failed to upload statistics: {e}")
-            if self.stats:
-                self.stats.log_error(f"Stats upload failed: {str(e)}")
 
     async def _download_and_save_hero_image(
         self,

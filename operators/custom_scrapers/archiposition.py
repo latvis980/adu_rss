@@ -358,6 +358,139 @@ class ArchipositionScraper(BaseCustomScraper):
         except Exception:
             return True
 
+    async def _download_hero_image_http(
+        self,
+        image_url: str,
+        article: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Download hero image using HTTP (not Playwright).
+
+        This avoids the 'Please use browser.new_context()' error
+        that occurs with Railway Browserless.
+
+        Args:
+            image_url: URL of the image to download
+            article: Article dict (needed for slug generation)
+
+        Returns:
+            Updated hero_image dict with r2_path/r2_url, or None if failed
+        """
+        if not image_url:
+            return None
+
+        try:
+            import aiohttp
+
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                'Referer': 'https://www.archiposition.com/',
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status != 200:
+                        print(f"[{self.source_id}]    Failed to download image: HTTP {response.status}")
+                        return None
+
+                    image_bytes = await response.read()
+
+                    if not image_bytes or len(image_bytes) < 1000:
+                        print(f"[{self.source_id}]    Image too small: {len(image_bytes) if image_bytes else 0} bytes")
+                        return None
+
+                    print(f"[{self.source_id}]    Downloaded image: {len(image_bytes)} bytes")
+
+            # Save to R2
+            from storage.r2 import R2Storage
+            r2 = R2Storage()
+
+            # Create hero_image dict
+            hero_image = {
+                "url": image_url,
+                "width": None,
+                "height": None,
+                "source": "custom_scraper"
+            }
+
+            # Temporarily add hero_image to article for save_hero_image
+            article["hero_image"] = hero_image
+
+            # Save to R2
+            updated_hero = r2.save_hero_image(
+                image_bytes=image_bytes,
+                article=article,
+                source=self.source_id
+            )
+
+            if updated_hero and updated_hero.get("r2_path"):
+                print(f"[{self.source_id}]    Saved to R2: {updated_hero.get('r2_path')}")
+                return updated_hero
+            else:
+                print(f"[{self.source_id}]    Failed to save to R2")
+                return hero_image
+
+        except ImportError:
+            print(f"[{self.source_id}]    aiohttp not installed, trying urllib")
+            # Fallback to urllib
+            return await self._download_hero_image_urllib(image_url, article)
+        except Exception as e:
+            print(f"[{self.source_id}]    Hero image error: {e}")
+            return None
+
+    async def _download_hero_image_urllib(
+        self,
+        image_url: str,
+        article: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Fallback image download using urllib."""
+        import urllib.request
+
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            }
+
+            request = urllib.request.Request(image_url, headers=headers)
+
+            with urllib.request.urlopen(request, timeout=15) as response:
+                image_bytes = response.read()
+
+            if not image_bytes or len(image_bytes) < 1000:
+                return None
+
+            print(f"[{self.source_id}]    Downloaded image: {len(image_bytes)} bytes")
+
+            # Save to R2
+            from storage.r2 import R2Storage
+            r2 = R2Storage()
+
+            hero_image = {
+                "url": image_url,
+                "width": None,
+                "height": None,
+                "source": "custom_scraper"
+            }
+
+            article["hero_image"] = hero_image
+
+            updated_hero = r2.save_hero_image(
+                image_bytes=image_bytes,
+                article=article,
+                source=self.source_id
+            )
+
+            if updated_hero and updated_hero.get("r2_path"):
+                print(f"[{self.source_id}]    Saved to R2: {updated_hero.get('r2_path')}")
+                return updated_hero
+
+            return hero_image
+
+        except Exception as e:
+            print(f"[{self.source_id}]    urllib download error: {e}")
+            return None
+
     async def fetch_articles(self, hours: int = 24) -> List[Dict[str, Any]]:
         """
         Fetch new articles from Archiposition.
@@ -374,9 +507,8 @@ class ArchipositionScraper(BaseCustomScraper):
         """
         print(f"[{self.source_id}] Starting HTML pattern scraping...")
 
-        # Initialize tracker and stats
+        # Initialize tracker
         await self._ensure_tracker()
-        self._init_stats()
 
         try:
             # Create page (this initializes browser automatically via _create_page)
@@ -474,8 +606,6 @@ class ArchipositionScraper(BaseCustomScraper):
                     if not self._is_within_age_limit(date_iso):
                         print(f"[{self.source_id}]    Skipped (too old)")
                         skipped_old += 1
-                        if self.stats:
-                            self.stats.log_skipped("too_old")
                         continue
 
                     # Build article dict
@@ -497,8 +627,7 @@ class ArchipositionScraper(BaseCustomScraper):
                     # Download and save hero image to R2 (image URL from grid!)
                     if image_url:
                         print(f"[{self.source_id}]    Hero image: {image_url[:60]}...")
-                        hero_image = await self._download_and_save_hero_image(
-                            page=page,
+                        hero_image = await self._download_hero_image_http(
                             image_url=image_url,
                             article=article
                         )
@@ -510,10 +639,6 @@ class ArchipositionScraper(BaseCustomScraper):
                         print(f"[{self.source_id}]    No hero image in grid")
 
                     new_articles.append(article)
-
-                    if self.stats:
-                        self.stats.log_article_found(url)
-
                     print(f"[{self.source_id}]    Added to results")
 
                     # Small delay between article page visits
@@ -532,12 +657,6 @@ class ArchipositionScraper(BaseCustomScraper):
                 print(f"   Hero images saved to R2: {images_saved}")
                 print(f"   Returning to pipeline: {len(new_articles)}")
 
-                # Log final count and upload stats
-                if self.stats:
-                    self.stats.log_final_count(len(new_articles))
-                    self.stats.print_summary()
-                    await self._upload_stats_to_r2()
-
                 return new_articles
 
             finally:
@@ -545,10 +664,6 @@ class ArchipositionScraper(BaseCustomScraper):
 
         except Exception as e:
             print(f"[{self.source_id}] Error in scraping: {e}")
-            if self.stats:
-                self.stats.log_error(f"Critical error: {str(e)}")
-                self.stats.print_summary()
-                await self._upload_stats_to_r2()
             import traceback
             traceback.print_exc()
             return []

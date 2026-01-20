@@ -13,12 +13,13 @@ Your task is to create concise, informative summaries of architecture and design
 Today's date is {current_date}. Use this for temporal context when describing projects.
 
 Guidelines:
-- Write exactly 2 sentences
+- Write exactly 2 sentences in British English
 - First sentence: What is the project (who designed what, where)
 - Second sentence: What makes it notable or interesting (design approach, innovation, context)
 - Be specific and factual, avoid generic praise
 - Use professional architectural terminology where appropriate
 - Keep the tone informative but engaging
+- If the article is an opinion piece, note that it's an opinion piece, but still mention the project discussed
 - Do not use emoji"""
 
 # User message template
