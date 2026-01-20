@@ -31,7 +31,7 @@ Usage:
 import asyncio
 import re
 import os
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Any
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin
 
@@ -45,9 +45,10 @@ from storage.article_tracker import ArticleTracker
 
 # Try to import cloudscraper for fallback
 try:
-    import cloudscraper
+    import cloudscraper as cloudscraper_module
     CLOUDSCRAPER_AVAILABLE = True
 except ImportError:
+    cloudscraper_module = None
     CLOUDSCRAPER_AVAILABLE = False
     print("[japan_architects] cloudscraper not installed - fallback disabled")
 
@@ -261,14 +262,14 @@ Do not use emoji."""
         Returns:
             HTML content or None if failed
         """
-        if not CLOUDSCRAPER_AVAILABLE:
+        if not CLOUDSCRAPER_AVAILABLE or cloudscraper_module is None:
             print(f"[{self.source_id}] cloudscraper not available")
             return None
 
         print(f"[{self.source_id}] Trying cloudscraper fallback...")
 
         try:
-            scraper = cloudscraper.create_scraper(
+            scraper = cloudscraper_module.create_scraper(
                 browser={
                     'browser': 'chrome',
                     'platform': 'darwin',
@@ -415,24 +416,27 @@ Do not use emoji."""
             if not self.tracker:
                 raise RuntimeError("Article tracker not initialized")
 
+            # Get all URLs for tracking
             all_urls = [url for url, _, _ in extracted]
-            seen_urls = await self.tracker.get_stored_headlines(self.source_id)
 
-            # Find new articles
-            new_articles_data = [
-                (url, title, html_block)
-                for url, title, html_block in extracted
-                if url not in seen_urls
-            ]
+            # Build lookup for title and html_block by URL
+            url_to_data: dict[str, Tuple[str, str]] = {
+                url: (title, html_block) for url, title, html_block in extracted
+            }
+
+            # Use filter_new_articles to get only new URLs
+            new_urls = await self.tracker.filter_new_articles(self.source_id, all_urls)
 
             print(f"[{self.source_id}] Database check:")
             print(f"   Total extracted: {len(extracted)}")
-            print(f"   Already seen: {len(extracted) - len(new_articles_data)}")
-            print(f"   New articles: {len(new_articles_data)}")
+            print(f"   Already seen: {len(extracted) - len(new_urls)}")
+            print(f"   New articles: {len(new_urls)}")
 
-            if not new_articles_data:
+            # Mark all URLs as seen
+            await self.tracker.mark_as_seen(self.source_id, all_urls)
+
+            if not new_urls:
                 print(f"[{self.source_id}] No new articles to process")
-                await self.tracker.store_headlines(self.source_id, all_urls)
                 if self.stats:
                     self.stats.log_final_count(0)
                     self.stats.print_summary()
@@ -446,7 +450,8 @@ Do not use emoji."""
             new_articles: list[dict] = []
             skipped_old = 0
 
-            for url, title, html_block in new_articles_data[:self.MAX_NEW_ARTICLES]:
+            for url in new_urls[:self.MAX_NEW_ARTICLES]:
+                title, html_block = url_to_data[url]
                 print(f"\n   Processing: {title[:50]}...")
 
                 # Extract date using AI
@@ -487,14 +492,11 @@ Do not use emoji."""
                 print(f"      Added")
 
             # ============================================================
-            # Step 5: Store All URLs and Finalize
+            # Step 5: Final Summary
             # ============================================================
-            await self.tracker.store_headlines(self.source_id, all_urls)
-
-            # Final Summary
             print(f"\n[{self.source_id}] Processing Summary:")
             print(f"   Articles found: {len(extracted)}")
-            print(f"   New articles: {len(new_articles_data)}")
+            print(f"   New articles: {len(new_urls)}")
             print(f"   Skipped (too old): {skipped_old}")
             print(f"   Successfully scraped: {len(new_articles)}")
 

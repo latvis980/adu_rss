@@ -374,19 +374,15 @@ class ArchipositionScraper(BaseCustomScraper):
         """
         print(f"[{self.source_id}] Starting HTML pattern scraping...")
 
-        try:
-            # Connect to browser
-            await self.connect()
-            print(f"[{self.source_id}] Connected to Railway Browserless")
+        # Initialize tracker and stats
+        await self._ensure_tracker()
+        self._init_stats()
 
-            # Create page with proper User-Agent
+        try:
+            # Create page (this initializes browser automatically via _create_page)
             page = await self._create_page()
 
             try:
-                # Initialize tracker and stats
-                await self._ensure_tracker()
-                self._init_stats()
-
                 # ============================================================
                 # Step 1: Load Category Page
                 # ============================================================
