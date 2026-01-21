@@ -396,6 +396,9 @@ class R2Storage:
         """
         Save manifest file with all candidates for the day.
 
+        IMPORTANT: This MERGES with existing manifest, not overwrites.
+        This allows both RSS and Scrapers services to add to the same manifest.
+
         Args:
             candidates: List of candidate info dicts from save_candidate()
             target_date: Target date (defaults to today)
@@ -406,19 +409,44 @@ class R2Storage:
         if target_date is None:
             target_date = date.today()
 
-        # Group by source
-        by_source: Dict[str, List[str]] = {}
+        # Try to load existing manifest first
+        existing_manifest = self.get_manifest(target_date)
+
+        # Get existing candidates (to merge with)
+        existing_candidates = []
+        existing_ids = set()
+        if existing_manifest:
+            existing_candidates = existing_manifest.get("candidates", [])
+            existing_ids = {c["id"] for c in existing_candidates}
+            print(f"   [INFO] Found existing manifest with {len(existing_candidates)} candidates")
+
+        # Add new candidates (skip duplicates)
+        new_count = 0
         for c in candidates:
-            source_id = c["article_id"].rsplit("_", 1)[0]
+            if c["article_id"] not in existing_ids:
+                existing_candidates.append({
+                    "id": c["article_id"],
+                    "has_image": c["has_image"],
+                    "json_path": c["json_path"],
+                    "image_path": c.get("image_path"),
+                })
+                existing_ids.add(c["article_id"])
+                new_count += 1
+
+        # Group all candidates by source
+        by_source: Dict[str, List[str]] = {}
+        for c in existing_candidates:
+            source_id = c["id"].rsplit("_", 1)[0]
             if source_id not in by_source:
                 by_source[source_id] = []
-            by_source[source_id].append(c["article_id"])
+            by_source[source_id].append(c["id"])
 
-        # Build manifest
+        # Build merged manifest
         manifest = {
             "date": target_date.isoformat(),
-            "created_at": datetime.now().isoformat(),
-            "total_candidates": len(candidates),
+            "created_at": existing_manifest.get("created_at") if existing_manifest else datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "total_candidates": len(existing_candidates),
             "sources": {
                 source_id: {
                     "count": len(ids),
@@ -426,15 +454,7 @@ class R2Storage:
                 }
                 for source_id, ids in by_source.items()
             },
-            "candidates": [
-                {
-                    "id": c["article_id"],
-                    "has_image": c["has_image"],
-                    "json_path": c["json_path"],
-                    "image_path": c.get("image_path"),
-                }
-                for c in candidates
-            ]
+            "candidates": existing_candidates
         }
 
         path = self._build_manifest_path(target_date)
@@ -446,7 +466,7 @@ class R2Storage:
             ContentType="application/json"
         )
 
-        print(f"   [OK] Saved manifest: {len(candidates)} candidates")
+        print(f"   [OK] Manifest updated: +{new_count} new, {len(existing_candidates)} total candidates")
         return path
 
     def get_manifest(self, target_date: Optional[date] = None) -> Optional[dict]:
