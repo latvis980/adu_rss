@@ -145,7 +145,7 @@ def summarize_article(article: dict, llm, prompt_template) -> dict:
         prompt_template: LangChain prompt template
 
     Returns:
-        Article dict with added ai_summary and tags
+        Article dict with added headline, ai_summary and tag
     """
     from datetime import datetime
 
@@ -168,8 +168,9 @@ def summarize_article(article: dict, llm, prompt_template) -> dict:
     parsed = parse_summary_response(response.content)
 
     # Add to article
+    article["headline"] = parsed["headline"]
     article["ai_summary"] = parsed["summary"]
-    article["tags"] = parsed["tags"]
+    article["tag"] = parsed["tag"]
 
     return article
 
@@ -223,8 +224,9 @@ async def run_monitor(
         except Exception as e:
             print(f"⚠️ Error summarizing '{article['title'][:30]}...': {e}")
             # Fallback: use original description
+            article["headline"] = article["title"]
             article["ai_summary"] = article["description"][:200] + "..."
-            article["tags"] = []
+            article["tag"] = ""
             summarized_articles.append(article)
 
     print(f"✅ Summarized {len(summarized_articles)} articles")
