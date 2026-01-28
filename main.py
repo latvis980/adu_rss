@@ -37,6 +37,8 @@ import argparse
 import aiohttp
 from datetime import datetime
 from typing import Optional, List
+from io import BytesIO
+from PIL import Image
 
 # Import operators
 from operators.rss_fetcher import RSSFetcher
@@ -192,6 +194,54 @@ def generate_summaries(articles: list, llm, prompt_template: str) -> list:
     return articles
 
 
+def convert_webp_to_jpeg(image_bytes: bytes, quality: int = 85) -> tuple[bytes, str]:
+    """
+    Convert WebP image to JPEG format.
+
+    Args:
+        image_bytes: Original image bytes (any format)
+        quality: JPEG quality (1-100, default 85)
+
+    Returns:
+        Tuple of (converted_bytes, content_type)
+        If already JPEG or conversion fails, returns original bytes
+    """
+    try:
+        # Open image from bytes
+        img = Image.open(BytesIO(image_bytes))
+
+        # Check if it's WebP or needs conversion
+        original_format = img.format
+
+        # If already JPEG, return as-is
+        if original_format == 'JPEG':
+            return image_bytes, 'image/jpeg'
+
+        # Convert RGBA to RGB (WebP often has alpha channel)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            # Create white background
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        # Convert to JPEG
+        output = BytesIO()
+        img.save(output, format='JPEG', quality=quality, optimize=True)
+        jpeg_bytes = output.getvalue()
+
+        print(f"      [CONVERT] {original_format} → JPEG ({len(image_bytes)} → {len(jpeg_bytes)} bytes)")
+        return jpeg_bytes, 'image/jpeg'
+
+    except Exception as e:
+        print(f"      [WARN] Image conversion failed: {e} - using original")
+        return image_bytes, 'image/jpeg'  # Assume JPEG if conversion fails
+
+
+
 async def download_hero_images(articles: list, scraper: Optional[ArticleScraper] = None) -> list:
     """
     Download hero images for articles.
@@ -229,10 +279,16 @@ async def download_hero_images(articles: list, scraper: Optional[ArticleScraper]
                 async with session.get(image_url) as response:
                     if response.status == 200:
                         image_bytes = await response.read()
+                        original_content_type = response.headers.get("Content-Type", "image/jpeg")
 
-                        # Store bytes in hero_image dict
-                        hero["bytes"] = image_bytes
-                        hero["content_type"] = response.headers.get("Content-Type", "image/jpeg")
+                        # Convert WebP (and other formats) to JPEG
+                        # This ensures all images are in JPEG format for R2 storage
+                        converted_bytes, final_content_type = convert_webp_to_jpeg(image_bytes)
+
+                        # Store converted bytes in hero_image dict
+                        hero["bytes"] = converted_bytes
+                        hero["content_type"] = final_content_type
+                        hero["original_format"] = original_content_type  # Track original format
 
                         downloaded += 1
                         print(f"   [{i}/{len(articles)}] [OK] {title}...")

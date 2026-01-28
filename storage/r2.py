@@ -322,9 +322,12 @@ class R2Storage:
 
         if image_bytes:
             hero = article.get("hero_image", {})
+            # Get content_type from hero_image (set by main.py after conversion)
+            # This will be 'image/jpeg' for converted WebP images
+            content_type = hero.get("content_type", "image/jpeg")
             extension = self._get_image_extension(
                 hero.get("url", ""),
-                None
+                content_type  # Pass content_type to get correct extension
             )
             image_filename = f"{article_id}.{extension}"
             # Use shared images folder (NOT inside candidates/)
