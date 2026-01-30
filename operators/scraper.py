@@ -82,11 +82,18 @@ class ArticleScraper:
             'dezeen.com': 25000,
             'designboom.com': 20000,
             'architizer.com': 20000,
-            'archpaper.com': 18000,
+            'archpaper.com': 25000,  # Increased - site needs more time
+        }
+
+        # Sites that need networkidle wait (heavy JavaScript/dynamic content)
+        self.networkidle_domains = {
+            'archpaper.com',  # WordPress with dynamic loading
+            'nextcity.org',   # Also needs more wait time
         }
 
         # Performance settings
         self.load_wait_time = 2.0  # Seconds to wait after page load
+        self.extended_wait_time = 4.0  # For sites needing extra time
         self.interaction_delay = 0.3
 
         # Statistics tracking
@@ -135,13 +142,13 @@ class ArticleScraper:
                         self.browser_pool.append(browser)
                         context = await self._create_context(browser)
                         self.browser_contexts.append(context)
-                        
+
                         # Create a persistent page for this context
                         # This keeps the browser alive (Browserless won't close it)
                         page = await context.new_page()
                         await self._configure_page(page)
                         self.browser_pages.append(page)
-                        
+
                         logger.info(f"   ✅ Browser {i + 1}/{self.browser_pool_size} ready with persistent page")
                 except Exception as e:
                     logger.error(f"   ❌ Browser {i + 1} failed: {e}")
@@ -232,11 +239,11 @@ class ArticleScraper:
                 context = await self._create_context(browser)
                 page = await context.new_page()
                 await self._configure_page(page)
-                
+
                 self.browser_pool[index] = browser
                 self.browser_contexts[index] = context
                 self.browser_pages[index] = page
-                
+
                 logger.info(f"   ✅ Browser-{index} reconnected with new page")
                 return True
             return False
@@ -271,7 +278,7 @@ class ArticleScraper:
         # Process articles sequentially per browser to avoid race conditions
         # Each browser processes its share of articles one at a time
         scraped_articles = []
-        
+
         # Distribute articles across browsers
         articles_per_browser: List[List[tuple]] = [[] for _ in range(len(self.browser_pool))]
         for i, article in enumerate(articles):
@@ -367,14 +374,24 @@ class ArticleScraper:
 
             # Get timeout for this domain
             domain = urlparse(url).netloc.lower()
+            clean_domain = domain.replace('www.', '')
             timeout = self.domain_timeouts.get(
-                domain.replace('www.', ''), 
+                clean_domain, 
                 self.default_timeout
             )
 
+            # Determine wait strategy - some sites need full network idle
+            if clean_domain in self.networkidle_domains:
+                wait_strategy = "networkidle"
+                post_load_wait = self.extended_wait_time
+                logger.info(f"   Using networkidle wait for {clean_domain}")
+            else:
+                wait_strategy = "domcontentloaded"
+                post_load_wait = self.load_wait_time
+
             # Navigate to page (reuse existing page instead of creating new one)
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-            await asyncio.sleep(self.load_wait_time)
+            await page.goto(url, wait_until=wait_strategy, timeout=timeout)
+            await asyncio.sleep(post_load_wait)
 
             # Dismiss popups/overlays
             await self._dismiss_overlays(page)
@@ -427,23 +444,32 @@ class ArticleScraper:
 
         except Exception as e:
             error_msg = str(e)
-            
+
             # Check if browser was closed - attempt reconnection
             if "Browser closed" in error_msg or "Target closed" in error_msg:
                 logger.warning(f"   🔄 Browser closed, attempting reconnection...")
                 reconnected = await self._reconnect_browser(browser_index)
-                
+
                 if reconnected:
                     # Update page reference and retry once
                     page = self.browser_pages[browser_index]
                     try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=self.default_timeout)
-                        await asyncio.sleep(self.load_wait_time)
-                        
+                        # Use same wait strategy for retry
+                        clean_domain = urlparse(url).netloc.lower().replace('www.', '')
+                        if clean_domain in self.networkidle_domains:
+                            wait_strategy = "networkidle"
+                            post_load_wait = self.extended_wait_time
+                        else:
+                            wait_strategy = "domcontentloaded"
+                            post_load_wait = self.load_wait_time
+
+                        await page.goto(url, wait_until=wait_strategy, timeout=self.default_timeout)
+                        await asyncio.sleep(post_load_wait)
+
                         hero_image = await self._extract_hero_image(page, url)
                         content = await self._extract_article_content(page, url)
                         images = await self._extract_images(page, url)
-                        
+
                         if content and len(content.strip()) > 100:
                             processing_time = time.time() - start_time
                             result.update({
@@ -459,7 +485,7 @@ class ArticleScraper:
                             return result
                     except Exception as retry_error:
                         logger.error(f"   ❌ Retry failed: {retry_error}")
-            
+
             result.update({
                 "full_content": "",
                 "images": [],
@@ -1007,7 +1033,7 @@ class ArticleScraper:
         self.browser_pages = []
         self.browser_contexts = []
         self.browser_pool = []
-        
+
         self.print_stats()
         logger.info("✅ Scraper shutdown complete")
 
