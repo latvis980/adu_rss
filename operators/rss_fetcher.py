@@ -130,12 +130,13 @@ class RSSFetcher:
         with urllib.request.urlopen(request, timeout=self._request_timeout) as response:
             return response.read()
 
-    def _fetch_with_cloudscraper(self, url: str) -> bytes:
+    def _fetch_with_cloudscraper(self, url: str, add_delay: bool = False) -> bytes:
         """
         Fetch URL using cloudscraper to bypass anti-bot protection.
 
         Args:
             url: URL to fetch
+            add_delay: Add a small delay before request (helps with rate limiting)
 
         Returns:
             Response content as bytes
@@ -143,14 +144,29 @@ class RSSFetcher:
         if not CLOUDSCRAPER_AVAILABLE:
             raise ImportError("cloudscraper not installed")
 
+        # Add delay if requested (helps avoid rate limiting)
+        if add_delay:
+            import time
+            time.sleep(2)
+
         scraper = cloudscraper.create_scraper(
             browser={
                 'browser': 'chrome',
                 'platform': 'darwin',
                 'desktop': True,
-            }
+            },
+            delay=10,  # Add delay between retries
         )
-        response = scraper.get(url, timeout=self._request_timeout)
+
+        # Add extra headers that might help
+        headers = {
+            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Referer': url.rsplit('/', 1)[0] + '/',  # Use site root as referer
+        }
+
+        response = scraper.get(url, timeout=self._request_timeout, headers=headers)
         response.raise_for_status()
         return response.content
 
@@ -228,6 +244,15 @@ class RSSFetcher:
                         print("   [OK] Success with cloudscraper")
                 except Exception as e:
                     print(f"   [WARN] Cloudscraper failed: {e}")
+                    # Try once more with delay
+                    try:
+                        print("   [INFO] Retrying cloudscraper with delay...")
+                        content = self._fetch_with_cloudscraper(rss_url, add_delay=True)
+                        feed = feedparser.parse(content)
+                        if feed.entries:
+                            print("   [OK] Success with cloudscraper (delayed)")
+                    except Exception as e2:
+                        print(f"   [WARN] Cloudscraper retry failed: {e2}")
 
             if feed.bozo and not feed.entries:
                 print(f"[WARN] Feed error for {source_name}: {feed.bozo_exception}")
@@ -391,7 +416,7 @@ class RSSFetcher:
                     return dt.isoformat()
                 except (ValueError, TypeError):
                     pass
-                
+
                 # Handle Archi.ru non-standard format: "Wed, 28 Jan 2026 16:01:00 GMT+4"
                 # Convert "GMT+N" or "GMT-N" to standard offset format "+0N00" or "-0N00"
                 try:
@@ -405,7 +430,7 @@ class RSSFetcher:
                             standard_offset = f"{sign}{offset_hours.zfill(2)}00"
                             # Replace in string
                             clean_date = re.sub(r'GMT[+-]\d+', standard_offset, raw_date)
-                            
+
                             # Parse using strptime with timezone
                             # Format: "Wed, 28 Jan 2026 16:01:00 +0400"
                             dt = datetime.strptime(clean_date, "%a, %d %b %Y %H:%M:%S %z")
