@@ -1,6 +1,6 @@
 # storage/r2.py
 """
-Cloudflare R2 Storage Module
+Cloudflare R2 Storage Module for adu_rss
 Handles all interactions with Cloudflare R2 for storing scraped news data and images.
 
 UNIFIED Folder Structure:
@@ -40,7 +40,7 @@ from urllib.parse import urlparse
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from utils.thumbnail import ThumbnailGenerator, get_thumbnail_path
+from utils.thumbnails import ThumbnailGenerator, get_thumbnail_path
 
 
 class R2Storage:
@@ -300,9 +300,10 @@ class R2Storage:
         Saves:
         - Article JSON to candidates/ folder
         - Hero image to shared images/ folder (if provided)
+        - Thumbnail image (400x400px) to shared images/ folder
 
         Args:
-            article: Article dict with headline, ai_summary, tag, etc.
+            article: Article dict with ai_summary, tag, etc.
             image_bytes: Optional hero image bytes
             target_date: Target date (defaults to today)
 
@@ -319,25 +320,69 @@ class R2Storage:
         # Determine image info
         has_image = False
         image_path = None
+        thumbnail_path = None
         image_filename = None
+        image_url = None
 
+        # Process and upload image if available
         if image_bytes:
-            hero = article.get("hero_image", {})
-            # Get content_type from hero_image (set by main.py after conversion)
-            # This will be 'image/jpeg' for converted WebP images
-            content_type = hero.get("content_type", "image/jpeg")
-            extension = self._get_image_extension(
-                hero.get("url", ""),
-                content_type  # Pass content_type to get correct extension
-            )
-            image_filename = f"{article_id}.{extension}"
-            # Use shared images folder (NOT inside candidates/)
-            image_path = self._build_image_path(
-                source_id, index, extension, target_date
-            )
-            has_image = True
+            # Get original URL from article
+            hero_image = article.get("hero_image", {})
+            image_url = hero_image.get("url", "")
 
-        # Build candidate JSON
+            # Determine extension from URL or default to jpg
+            extension = self._get_image_extension(image_url) if image_url else "jpg"
+
+            # Build paths
+            image_path = self._build_image_path(source_id, index, extension, target_date)
+            thumbnail_path = get_thumbnail_path(image_path)
+            image_filename = f"{source_id}_{index:03d}.{extension}"
+
+            # Upload full-size image
+            content_type = self._get_content_type(extension)
+
+            try:
+                self.client.put_object(
+                    Bucket=self.bucket_name,
+                    Key=image_path,
+                    Body=image_bytes,
+                    ContentType=content_type,
+                    CacheControl="public, max-age=31536000"
+                )
+                has_image = True
+                print(f"      ✅ Uploaded full-size: {image_path}")
+            except Exception as e:
+                print(f"      ❌ Failed to upload full-size image: {e}")
+                has_image = False
+
+            # Generate and upload thumbnail
+            if has_image:
+                thumbnail_bytes = ThumbnailGenerator.create_thumbnail(image_bytes)
+
+                if thumbnail_bytes:
+                    try:
+                        self.client.put_object(
+                            Bucket=self.bucket_name,
+                            Key=thumbnail_path,
+                            Body=thumbnail_bytes,
+                            ContentType="image/jpeg",
+                            CacheControl="public, max-age=31536000"
+                        )
+
+                        # Calculate size reduction for logging
+                        original_kb = len(image_bytes) / 1024
+                        thumbnail_kb = len(thumbnail_bytes) / 1024
+                        reduction = ((original_kb - thumbnail_kb) / original_kb) * 100
+
+                        print(f"      ✅ Thumbnail: {original_kb:.1f}KB → {thumbnail_kb:.1f}KB ({reduction:.0f}% smaller)")
+                    except Exception as e:
+                        print(f"      ⚠️  Thumbnail upload failed: {e}")
+                        thumbnail_path = None
+                else:
+                    print("      ⚠️  Thumbnail generation failed")
+                    thumbnail_path = None
+
+        # Build candidate JSON with image info
         candidate_data = {
             "id": article_id,
             "index": index,
@@ -352,8 +397,9 @@ class R2Storage:
             "image": {
                 "filename": image_filename,
                 "r2_path": image_path,
+                "r2_thumbnail_path": thumbnail_path,  # NEW: thumbnail path
                 "has_image": has_image,
-                "original_url": article.get("hero_image", {}).get("url") if has_image else None,
+                "original_url": image_url if has_image else None,
             },
             "saved_at": datetime.now().isoformat(),
         }
@@ -368,28 +414,13 @@ class R2Storage:
             ContentType="application/json"
         )
 
-        print(f"   [OK] Saved candidate: {article_id}")
-
-        # Save image to shared images/ folder
-        if image_bytes and image_path:
-            content_type = self._get_content_type(
-                image_path.split('.')[-1]
-            )
-
-            self.client.put_object(
-                Bucket=self.bucket_name,
-                Key=image_path,
-                Body=image_bytes,
-                ContentType=content_type,
-                CacheControl="public, max-age=31536000"
-            )
-
-            print(f"   [OK] Saved image: {image_filename}")
+        print(f"   ✅ Saved candidate: {article_id}")
 
         return {
             "article_id": article_id,
             "json_path": json_path,
             "image_path": image_path,
+            "thumbnail_path": thumbnail_path,  # NEW: return thumbnail path
             "has_image": has_image,
         }
 
