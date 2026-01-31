@@ -40,6 +40,7 @@ from urllib.parse import urlparse
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from utils.thumbnail import ThumbnailGenerator, get_thumbnail_path
 
 
 class R2Storage:
