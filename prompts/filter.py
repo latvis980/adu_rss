@@ -45,6 +45,7 @@ EXCLUDE articles about:
 - New issues of architectural magazines even if they mention projects
 - Pieces about newsletters, even if they mention projects
 - Articles about architecture schools, architecture students, or architecture students' projects
+- Articles about budgets and developement plans, even if they mention projects
 - Interviews and opinion pieces
 - Discussions and roundtables
 - Interior design and decoration

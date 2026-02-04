@@ -5,6 +5,7 @@ Prompts for generating article summaries and tags.
 """
 
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+import re
 
 # System prompt for the AI summarizer
 SUMMARIZE_SYSTEM_PROMPT = """You are an architecture news editor for a professional digest. 
@@ -13,7 +14,7 @@ Your task is to create concise, informative summaries of architecture and design
 Today's date is {current_date}. Use this for temporal context when describing projects.
 
 Guidelines:
-- Title format: PROJECT NAME / ARCHITECT OR BUREAU (e.g., "Cloud 11 Office Complex / Snøhetta"). If the architect or bureau is unknown, don't write anything, just the name of the project. DO NOT write Uknown in the title
+- Title format: PROJECT NAME / ARCHITECT OR BUREAU (e.g., "Cloud 11 Office Complex / Snøhetta"). If the architect or bureau is unknown, don't write anything, just the name of the project. DO NOT write Unknown in the title
 - Write description: exactly 2 sentences in British English. First sentence: What is the project (who designed what, where). Second sentence: What makes it notable or interesting
 - If the project name is in the language that doesn't match the country language (for example, in ArchDaily Brasil a project in Cina is named in Portuguese), translate the name of the project to English
 - Be specific and factual, avoid generic praise
@@ -32,7 +33,7 @@ Description: {description}
 Source: {url}
 
 Respond with ONLY:
-1. Title in format: PROJECT NAME / ARCHITECT OR BUREAU or just PROJECT NAME if author unknown or irrelevant. DO NOT write Uknown in the title
+1. Title in format: PROJECT NAME / ARCHITECT OR BUREAU or just PROJECT NAME if author unknown or irrelevant. DO NOT write Unknown in the title
 2. On a new line, a 2-sentence summary
 3. On a new line, 1 relevant tag (one word, the realm or type of the project: urbanism, museums, library, culture, education, airport,  etc.). No spaces, hyphens, or special characters in the tag.
 
@@ -72,6 +73,14 @@ def parse_summary_response(response_text: str) -> dict:
         headline = ""
         summary = lines[0] if lines else ""
         tag = ""
+
+    # Strip "Unknown" from headlines (safety net for AI ignoring instructions)
+    if headline:
+        headline = re.sub(r'\s*/\s*Unknown\s*$', '', headline, flags=re.IGNORECASE)
+        headline = re.sub(r'\s*/\s*Unknown\s+Architect(s)?\s*$', '', headline, flags=re.IGNORECASE)
+        headline = re.sub(r'\s*/\s*Unknown\s+Bureau\s*$', '', headline, flags=re.IGNORECASE)
+        headline = re.sub(r'\s*/\s*Unknown\s+Studio\s*$', '', headline, flags=re.IGNORECASE)
+        headline = headline.strip()
 
     return {
         "headline": headline,
