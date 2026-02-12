@@ -98,8 +98,19 @@ def record_article_to_db(
             .execute()
         
         if existing.data:
-            # Already recorded, skip
-            return existing.data[0]["id"]
+            # Already recorded - update R2 paths in case they changed (e.g., after restart)
+            existing_id = existing.data[0]["id"]
+            try:
+                client.table("all_articles")\
+                    .update({
+                        "r2_path": r2_path,
+                        "r2_image_path": r2_image_path,
+                    })\
+                    .eq("id", existing_id)\
+                    .execute()
+            except Exception as e:
+                print(f"[DB] Failed to update paths for existing article: {e}")
+            return existing_id
     except Exception as e:
         print(f"[DB] Error checking existing article: {e}")
     
