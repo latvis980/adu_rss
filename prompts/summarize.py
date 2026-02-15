@@ -35,7 +35,21 @@ Source: {url}
 Respond with ONLY:
 1. Title in format: PROJECT NAME / ARCHITECT OR BUREAU or just PROJECT NAME if author unknown or irrelevant. DO NOT write Unknown in the title
 2. On a new line, a 2-sentence summary
-3. On a new line, 1 relevant tag (one word, the realm or type of the project: urbanism, museums, library, culture, education, airport,  etc.). No spaces, hyphens, or special characters in the tag.
+3. On a new line, 1 relevant tag (one word, choose from this exact list: 
+#residential 
+#hospitality 
+#office 
+#culture 
+#education
+#public 
+#infrastructure 
+#landscape 
+#retail 
+#interior 
+#masterplan 
+#reuse
+#mixeduse). 
+No spaces, hyphens, or special characters in the tag.
 
 Example format:
 Cloud 11 Office Complex / Snøhetta
