@@ -142,15 +142,6 @@ SOURCES = {
         "category": "critique",
         "scrape_timeout": 20000,
     },
-    "archiru": {
-        "name": "Archi.ru",
-        "domains": ["archi.ru", "www.archi.ru"],
-        "rss_url": "https://archi.ru/rss.xml",
-        "tier": 2,
-        "region": "europe",
-        "category": "russia",
-        "scrape_timeout": 20000,
-    },
 
     # =========================================================================
     # TIER 2 - Asia-Pacific
