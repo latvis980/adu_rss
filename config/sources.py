@@ -128,6 +128,14 @@ SOURCES = {
         "category": "critical_theory",
         "scrape_timeout": 20000,
     },
+    "architizer": {
+        "name": "Architizer",
+        "domains": ["architizer.com", "www.architizer.com"],
+        "rss_url": "https://architizer.com/blog/feed/",
+        "tier": 2,
+        "region": "north_america",
+        "scrape_timeout": 20000,
+    },
 
     # =========================================================================
     # TIER 2 - Europe
