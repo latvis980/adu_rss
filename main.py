@@ -194,12 +194,14 @@ def generate_summaries(articles: list, llm, prompt_template) -> list:
         try:
             # summarize_article expects (article, llm, prompt_template)
             summarized = summarize_article(article, llm, prompt_template)
-            article["headline"] = summarized.get("headline", "")
+            article["headline_line_1"] = summarized.get("headline_line_1", "")
+            article["headline_line_2"] = summarized.get("headline_line_2", "")
             article["ai_summary"] = summarized.get("ai_summary", "")
             article["tags"] = summarized.get("tags", [])
         except Exception as e:
             print(f"      [WARN] Error: {e}")
-            article["headline"] = article.get("title", "")
+            article["headline_line_1"] = article.get("title", "")
+            article["headline_line_2"] = ""
             article["ai_summary"] = article.get("description", "")[:200] + "..."
             article["tags"] = []
 
@@ -563,7 +565,8 @@ async def run_pipeline(
             print(f"   [ERROR] AI summarization failed: {e}")
             for article in articles:
                 if not article.get("ai_summary"):
-                    article["headline"] = article.get("title", "")
+                    article["headline_line_1"] = article.get("title", "")
+                    article["headline_line_2"] = ""
                     article["ai_summary"] = article.get("description", "")[:200] + "..."
                     article["tags"] = []
 
