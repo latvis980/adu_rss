@@ -168,7 +168,8 @@ def summarize_article(article: dict, llm, prompt_template) -> dict:
     parsed = parse_summary_response(response.content)
 
     # Add to article
-    article["headline"] = parsed["headline"]
+    article["headline_line_1"] = parsed["headline_line_1"]
+    article["headline_line_2"] = parsed["headline_line_2"]
     article["ai_summary"] = parsed["summary"]
     article["tags"] = parsed.get("tags", [])
 
