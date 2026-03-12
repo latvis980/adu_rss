@@ -206,6 +206,7 @@ def parse_summary_response(response_text: str) -> dict:
         h = re.sub(r'\s*/\s*Unknown\s+Studio\s*$', '', h, flags=re.IGNORECASE)
         h = re.sub(r'\bVarious\b', '', h, flags=re.IGNORECASE)
         h = re.sub(r'  +', ' ', h).strip()
+        h = re.sub(r'\s*/\s*$', '', h)  # strip trailing " /" with nothing after it
         return h
 
     headline_line_1 = _clean_headline(headline_line_1)
